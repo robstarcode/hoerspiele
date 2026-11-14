@@ -48,6 +48,23 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 /* Elternbereich */
 .p{font-size:16px;-webkit-user-select:text;user-select:text}
 .p h2{margin:22px 0 8px;font-size:20px}
+/* Version 13: feste Leiste und einklappbare Abschnitte im Elternbereich */
+.ptop{position:sticky;top:0;z-index:7;background:#fff3d6;margin:-14px -14px 0;padding:10px 14px 8px;box-shadow:0 2px 6px rgba(0,0,0,.12)}
+.pbar{display:flex;justify-content:space-between;gap:10px}
+.pbar button{border:0;border-radius:12px;font-size:17px;font-weight:600;padding:12px 16px;color:#fff}
+.pdone{background:#ff8a00}
+.pup{background:#888}
+.pmsg{margin-top:8px;background:#fff;border-radius:12px;padding:10px 12px;font-size:15px;-webkit-user-select:text;user-select:text}
+.pmsg .x{color:#999}
+.sec{margin:10px 0}
+.sh{display:flex;align-items:center;gap:10px;background:#fff;border-radius:14px;padding:10px 12px;scroll-margin-top:130px;cursor:pointer}
+.sh.open{border-bottom-left-radius:0;border-bottom-right-radius:0;background:#ffe9bf}
+.sh img,.sh .ph{width:48px;height:48px;border-radius:10px;object-fit:cover;flex:none}
+.sh .ph{background:#ffd166;display:flex;align-items:center;justify-content:center;font-size:24px}
+.sh .st{flex:1;display:flex;flex-direction:column;min-width:0}
+.sh .st small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sh .ar{color:#999;font-size:14px}
+.sec > .box{margin-top:0;border-top-left-radius:0;border-top-right-radius:0}
 .p input[type=text]{width:100%;font-size:16px;padding:10px;border:1px solid #bbb;border-radius:10px;margin:4px 0}
 .p button{font-size:16px;padding:10px 14px;border-radius:10px;border:0;background:#2b6fb6;color:#fff;margin:4px 6px 4px 0}
 .p button.gray{background:#888}
@@ -781,7 +798,6 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       h('option', { value: 'artist' }, ['Lieder eines Künstlers'])
     ]);
     return h('div', { class: 'box' }, [
-      h('b', {}, ['Neue Reihe hinzufügen']),
       h('div', {}, [h('small', {}, ['Name'])]), nIn,
       h('div', {}, [h('small', {}, ['Art'])]), mSel,
       h('button', { onclick: function () {
@@ -789,62 +805,95 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
         if (!name) return;
         var s = { id: 's' + Date.now(), name: name, mode: mSel.value, query: name, filter: '', cover: null, albums: [],
           play: mSel.value === 'artist' ? 'songs' : 'album' };
-        cfg.series.push(s); saveCfg();
-        state.msg = '„' + name + '“ angelegt. Unten bei der Reihe auf „Suchen“ tippen oder einen Spotify-Link einfügen.';
+        cfg.series.push(s); saveCfg(); state.open = s.id;
+        state.msg = '„' + name + '“ angelegt. Die Suche läuft, die Reihe ist unten aufgeklappt.';
         render();
         search(s);
       } }, ['Anlegen und suchen'])
     ]);
   }
 
+  /* Version 13: feste Leiste oben (Fertig / Nach oben, darunter Hinweise) und einklappbare Abschnitte –
+     es ist immer nur ein Abschnitt offen (state.open). */
+  function toggleSection(key) {
+    state.open = state.open === key ? null : key;
+    render();
+    if (state.open) {
+      var el = document.getElementById('sec-' + key);
+      if (el) el.scrollIntoView({ block: 'start' });
+    }
+  }
+  function section(key, thumb, title, sub, body) {
+    var isOpen = state.open === key;
+    var head = h('div', { class: 'sh' + (isOpen ? ' open' : ''), id: 'sec-' + key, onclick: function () { toggleSection(key); } }, [
+      thumb === undefined ? null : (thumb ? h('img', { src: thumb }) : h('span', { class: 'ph' }, ['♪'])),
+      h('div', { class: 'st' }, [h('b', {}, [title]), sub ? h('small', {}, [sub]) : null]),
+      h('span', { class: 'ar' }, [isOpen ? '▲' : '▼'])
+    ]);
+    return h('div', { class: 'sec' }, [head, isOpen ? body() : null]);
+  }
+  var PLAY_LABEL = { album: 'ganzes Album', stories: 'Geschichten einzeln', songs: 'Lieder einzeln' };
+
   function renderParent() {
     var out = [];
-    out.push(h('button', { class: 'back', onclick: function () { state.view = 'home'; state.msg = ''; render(); } }, ['⬅']));
+    var top = h('div', { class: 'ptop' }, [
+      h('div', { class: 'pbar' }, [
+        h('button', { class: 'pdone', onclick: function () { state.view = 'home'; state.msg = ''; state.open = null; render(); window.scrollTo(0, 0); } }, ['⬅ Fertig']),
+        h('button', { class: 'pup', onclick: function () { window.scrollTo(0, 0); } }, ['⬆ Nach oben'])
+      ]),
+      state.msg ? h('div', { class: 'pmsg', onclick: function () { state.msg = ''; render(); } }, [state.msg, h('span', { class: 'x' }, [' ✕'])]) : null
+    ]);
+    out.push(top);
     var p = h('div', { class: 'p' });
-    if (state.msg) p.appendChild(h('div', { class: 'box' }, [state.msg]));
+    if (!tok.refresh && state.open == null) state.open = 'conn';
 
     // 1. Spotify-App-ID und Login
-    p.appendChild(h('h2', {}, ['1. Spotify verbinden']));
-    var idIn = h('input', { type: 'text', value: cfg.clientId, placeholder: 'Client ID' });
-    p.appendChild(h('div', { class: 'box' }, [
-      h('small', {}, ['Redirect URI, genau so im Spotify Developer Dashboard eintragen:']),
-      h('div', {}, [h('code', {}, [REDIRECT])]),
-      h('div', {}, [h('small', {}, ['Client ID der Spotify-App'])]), idIn,
-      h('button', { onclick: function () { cfg.clientId = idIn.value.trim(); saveCfg(); if (cfg.clientId) login(); } }, [tok.refresh ? 'Neu verbinden' : 'Mit Spotify verbinden']),
-      tok.refresh ? h('div', {}, [h('small', {}, ['✅ Verbunden'])]) : null
-    ]));
+    p.appendChild(h('h2', {}, ['Einstellungen']));
+    p.appendChild(section('conn', undefined, 'Spotify-Verbindung', tok.refresh ? '✅ verbunden' : 'nicht verbunden', function () {
+      var idIn = h('input', { type: 'text', value: cfg.clientId, placeholder: 'Client ID' });
+      return h('div', { class: 'box' }, [
+        h('small', {}, ['Redirect URI, genau so im Spotify Developer Dashboard eintragen:']),
+        h('div', {}, [h('code', {}, [REDIRECT])]),
+        h('div', {}, [h('small', {}, ['Client ID der Spotify-App'])]), idIn,
+        h('button', { onclick: function () { cfg.clientId = idIn.value.trim(); saveCfg(); if (cfg.clientId) login(); } }, [tok.refresh ? 'Neu verbinden' : 'Mit Spotify verbinden']),
+        tok.refresh ? h('button', { class: 'red', onclick: function () {
+          tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
+        } }, ['Von Spotify abmelden']) : null
+      ]);
+    }));
 
     if (tok.refresh) {
       // 2. Geräte
-      p.appendChild(h('h2', {}, ['2. Wo soll es spielen?']));
-      var dbox = h('div', { class: 'box' }, [
-        h('div', {}, [h('small', {}, ['Ausgewählt: ' + (cfg.devices.length ? cfg.devices.map(function (d) { return devIcon(d) + ' ' + d.name + (d.id === cfg.deviceId ? ' (aktiv)' : ''); }).join(', ') : 'keins – es spielt auf dem zuletzt aktiven Gerät')])]),
-        h('div', {}, [h('small', {}, ['Bei zwei oder mehr Geräten sieht deine Tochter oben einen Umschalter.'])]),
-        h('button', { onclick: loadDevices }, ['Geräte suchen'])
-      ]);
-      (state.devices || []).forEach(function (d) {
-        var cb = h('input', { type: 'checkbox' });
-        cb.checked = cfg.devices.some(function (x) { return x.id === d.id || x.name === d.name; });
-        cb.addEventListener('change', function () {
-          cfg.devices = cfg.devices.filter(function (x) { return x.id !== d.id && x.name !== d.name; });
-          if (cb.checked) cfg.devices.push({ id: d.id, name: d.name, type: d.type });
-          if (!currentDev()) { cfg.deviceId = cfg.devices[0] ? cfg.devices[0].id : null; cfg.deviceName = cfg.devices[0] ? cfg.devices[0].name : ''; }
-          saveCfg(); render();
+      var devSum = cfg.devices.length ? cfg.devices.map(function (d) { return devIcon(d) + ' ' + d.name; }).join(', ') : 'zuletzt aktives Gerät';
+      p.appendChild(section('dev', undefined, 'Wo soll es spielen?', devSum, function () {
+        var dbox = h('div', { class: 'box' }, [
+          h('div', {}, [h('small', {}, ['Ausgewählt: ' + (cfg.devices.length ? cfg.devices.map(function (d) { return devIcon(d) + ' ' + d.name + (d.id === cfg.deviceId ? ' (aktiv)' : ''); }).join(', ') : 'keins – es spielt auf dem zuletzt aktiven Gerät')])]),
+          h('div', {}, [h('small', {}, ['Bei zwei oder mehr Geräten sieht deine Tochter oben einen Umschalter.'])]),
+          h('button', { onclick: loadDevices }, ['Geräte suchen'])
+        ]);
+        (state.devices || []).forEach(function (d) {
+          var cb = h('input', { type: 'checkbox' });
+          cb.checked = cfg.devices.some(function (x) { return x.id === d.id || x.name === d.name; });
+          cb.addEventListener('change', function () {
+            cfg.devices = cfg.devices.filter(function (x) { return x.id !== d.id && x.name !== d.name; });
+            if (cb.checked) cfg.devices.push({ id: d.id, name: d.name, type: d.type });
+            if (!currentDev()) { cfg.deviceId = cfg.devices[0] ? cfg.devices[0].id : null; cfg.deviceName = cfg.devices[0] ? cfg.devices[0].name : ''; }
+            saveCfg(); render();
+          });
+          dbox.appendChild(h('label', { class: 'row' }, [cb, h('span', {}, [devIcon(d) + ' ' + d.name + ' (' + d.type + ')'])]));
         });
-        dbox.appendChild(h('label', { class: 'row' }, [cb, h('span', {}, [devIcon(d) + ' ' + d.name + ' (' + d.type + ')'])]));
-      });
-      p.appendChild(dbox);
+        return dbox;
+      }));
 
       // 3. Hörspielreihen
-      p.appendChild(h('h2', {}, ['3. Hörspielreihen und Musik']));
-      p.appendChild(newSeriesBox());
-      cfg.series.forEach(function (s) { p.appendChild(seriesEditor(s)); });
+      p.appendChild(h('h2', {}, ['Hörspielreihen und Musik']));
+      p.appendChild(section('new', undefined, '+ Neue Reihe hinzufügen', '', newSeriesBox));
+      cfg.series.forEach(function (s) {
+        var sub = s.albums.length + ' Kacheln · ' + (s.mode === 'artist' ? 'Künstler' : PLAY_LABEL[playMode(s)]);
+        p.appendChild(section(s.id, coverOf(s), s.name, sub, function () { return seriesEditor(s); }));
+      });
 
-      p.appendChild(h('h2', {}, ['Sonstiges']));
-      p.appendChild(h('button', { class: 'red', onclick: function () {
-        tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
-      } }, ['Von Spotify abmelden']));
-      p.appendChild(h('div', {}, [h('small', {}, ['Version 12'])]));
+      p.appendChild(h('div', { style: 'margin-top:20px' }, [h('small', {}, ['Version 13'])]));
     }
     out.push(p);
     return out;
