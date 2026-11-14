@@ -95,6 +95,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var changed = false;
     (cfg.series || []).forEach(function (s) {
       if (s.id === 'conni' && s.split === undefined) { s.split = true; changed = true; }
+      /* Version 12: Haken „Geschichten einzeln“ wird zur Auswahl play = 'album' | 'stories' | 'songs' */
+      if (!s.play) { s.play = s.split ? 'stories' : 'album'; changed = true; }
     });
     if (changed) saveCfg();
   })();
@@ -139,6 +141,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function tileContent(img, name) {
     return img ? h('img', { src: img }) : h('span', { class: 'tname' }, [name || '?']);
   }
+  function playMode(s) { return (s && s.play) || (s && s.split ? 'stories' : 'album'); }
   function locked() { return Date.now() < (state.lockUntil || 0); }
 
   /* ---------- Spotify Login (PKCE) ---------- */
@@ -261,7 +264,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
 
   var busy = false;
-  async function play(album, story) {
+  async function play(album, story, keepGoing) {
     if (busy) return;
     busy = true;
     try {
@@ -276,7 +279,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       }
       if (r.ok) {
         state.now = album; state.story = story || null; state.playing = true;
-        stopInfo = story ? { uri: uriOf(album), album: album, story: story } : null;
+        stopInfo = (story && !keepGoing) ? { uri: uriOf(album), album: album, story: story } : null;
         if (stopInfo) scheduleStop(4000); else clearTimeout(stopTimer);
         if (state.view === 'parent') render(); else openPlayer();
       }
@@ -383,6 +386,28 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       loadingAlbum = false;
     }
     if (!a.stories || a.stories.length < 2) return play(a);
+    state.storyMode = 'stories';
+    state.view = 'stories'; state.albumUri = uriOf(a); state.lockUntil = Date.now() + 500; render(); window.scrollTo(0, 0);
+  }
+  /* Version 12: Musikalben – jedes Lied eine Kachel, nach dem Lied läuft das Album weiter */
+  function songItems(a) { return (a.trackIds || []).map(function (id, i) { return { start: i, end: i }; }); }
+  async function openSongs(s, a) {
+    if (loadingAlbum || busy) return;
+    if (!isAlbum(a)) return play(a);
+    if (!a.trackIds) {
+      loadingAlbum = true;
+      toast('⏳');
+      try { var tr = await loadTracks(a); a.trackIds = tr.map(function (t) { return t.id; }); a.trackMs = tr.map(function (t) { return t.ms; }); saveCfg(); }
+      catch (e) {
+        console.log(e);
+        state.msg = 'Bei „' + a.name + '“ konnten die Lieder nicht geladen werden: ' + e.message;
+        loadingAlbum = false;
+        return play(a);
+      }
+      loadingAlbum = false;
+    }
+    if (a.trackIds.length < 2) return play(a);
+    state.storyMode = 'songs';
     state.view = 'stories'; state.albumUri = uriOf(a); state.lockUntil = Date.now() + 500; render(); window.scrollTo(0, 0);
   }
   /* Version 9: Symbol wechselt sofort beim Tippen; schlägt der Befehl fehl, springt es zurück.
@@ -417,6 +442,11 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       var uri = (j.context && j.context.uri) || '';
       var a = uri ? findItem(uri) : null;
       if (a) state.now = a;
+      // Musik läuft weiter: Rahmen und Symbol auf das gerade laufende Lied setzen
+      if (a && state.storyMode === 'songs' && state.story && j.item && a.trackIds) {
+        var ti = a.trackIds.indexOf(j.item.id);
+        if (ti >= 0) state.story = { start: ti, end: ti };
+      }
       state.playing = !!j.is_playing && !!a;
       render();
     } catch (e) { console.log(e); }
@@ -471,7 +501,9 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       h('div', { class: 'grid' }, s.albums.map(function (a) {
         return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () {
           if (locked()) return;
-          if (s.split) openAlbum(s, a); else play(a);
+          if (playMode(s) === 'stories') openAlbum(s, a);
+          else if (playMode(s) === 'songs') openSongs(s, a);
+          else play(a);
         } }, [tileContent(a.img, a.name)]);
       }))
     ];
@@ -494,14 +526,16 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
   function renderStories() {
     var a = findItem(state.albumUri);
-    if (!a || !a.stories) { state.view = 'series'; return renderSeries(); }
+    var songs = state.storyMode === 'songs';
+    var items = a ? (songs ? songItems(a) : a.stories) : null;
+    if (!items || !items.length) { state.view = 'series'; return renderSeries(); }
     return [
       withBack(function () { state.view = 'series'; render(); }),
-      h('div', { class: 'grid' }, a.stories.map(function (st, i) {
+      h('div', { class: 'grid' }, items.map(function (st, i) {
         var sel = state.now === a && state.story && state.story.start === st.start;
         return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () {
           if (locked()) return; // versehentliches Nachtippen nach dem Öffnen
-          play(a, st);
+          play(a, st, songs);
         } }, [tileContent(a.img, a.name), symbol(i)]);
       }))
     ];
@@ -512,7 +546,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var a = state.now;
     if (!a) { state.view = state.backTo || 'home'; return renderView(); }
     var idx = -1;
-    if (state.story && a.stories) {
+    if (state.story && state.storyMode === 'songs') idx = state.story.start;
+    else if (state.story && a.stories) {
       for (var i = 0; i < a.stories.length; i++) if (a.stories[i].start === state.story.start) idx = i;
     }
     return [h('div', { class: 'player' }, [
@@ -632,11 +667,14 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       h('div', {}, [h('small', {}, ['Filter'])]), fIn,
       h('button', { onclick: function () { keep(); search(s); } }, ['Suchen']),
       (function () {
-        var cb = h('input', { type: 'checkbox' });
-        cb.checked = !!s.split;
-        cb.addEventListener('change', function () { s.split = cb.checked; saveCfg(); render(); });
-        return h('label', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0' }, [cb,
-          h('small', {}, ['Mehrere Geschichten pro Folge einzeln anzeigen (hält nach jeder Geschichte an)'])]);
+        var sel = h('select', {}, [
+          h('option', { value: 'album' }, ['Ganzes Album abspielen']),
+          h('option', { value: 'stories' }, ['Geschichten einzeln, danach anhalten (Hörspiele)']),
+          h('option', { value: 'songs' }, ['Lieder einzeln, danach weiterlaufen (Musik)'])
+        ]);
+        sel.value = playMode(s);
+        sel.addEventListener('change', function () { s.play = sel.value; s.split = sel.value === 'stories'; saveCfg(); render(); });
+        return h('div', {}, [h('div', {}, [h('small', {}, ['Beim Antippen eines Albums (gilt nur für Alben, nicht für Playlists oder Künstler)'])]), sel]);
       })(),
       h('div', {}, [h('small', {}, ['Oder direkt per Link'])]), linkIn,
       h('button', { onclick: function () { keep(); addLink(s, linkIn.value); } }, ['Link hinzufügen'])
@@ -679,8 +717,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     if (open) {
       s.albums.forEach(function (a) {
         box.appendChild(h('div', { class: 'row' }, [h('img', { src: a.img }),
-          h('span', {}, [a.name + (s.split && a.stories ? ' – ' + a.stories.length + ' Geschichten' : '')]),
-          (s.split && isAlbum(a)) ? h('button', { onclick: function () { editStories(s, a); } }, ['Geschichten']) : null,
+          h('span', {}, [a.name + (playMode(s) === 'stories' && a.stories ? ' – ' + a.stories.length + ' Geschichten' : '')]),
+          (playMode(s) === 'stories' && isAlbum(a)) ? h('button', { onclick: function () { editStories(s, a); } }, ['Geschichten']) : null,
           h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover']),
           h('button', { class: 'red', onclick: function () {
             s.albums = s.albums.filter(function (x) { return x !== a; }); saveCfg(); render();
@@ -749,7 +787,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       h('button', { onclick: function () {
         var name = nIn.value.trim();
         if (!name) return;
-        var s = { id: 's' + Date.now(), name: name, mode: mSel.value, query: name, filter: '', cover: null, albums: [] };
+        var s = { id: 's' + Date.now(), name: name, mode: mSel.value, query: name, filter: '', cover: null, albums: [],
+          play: mSel.value === 'artist' ? 'songs' : 'album' };
         cfg.series.push(s); saveCfg();
         state.msg = '„' + name + '“ angelegt. Unten bei der Reihe auf „Suchen“ tippen oder einen Spotify-Link einfügen.';
         render();
@@ -805,7 +844,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(h('button', { class: 'red', onclick: function () {
         tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
       } }, ['Von Spotify abmelden']));
-      p.appendChild(h('div', {}, [h('small', {}, ['Version 11'])]));
+      p.appendChild(h('div', {}, [h('small', {}, ['Version 12'])]));
     }
     out.push(p);
     return out;
