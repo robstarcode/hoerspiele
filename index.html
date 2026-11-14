@@ -643,9 +643,20 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     ]);
     if (res) {
       box.appendChild(h('div', {}, [h('small', {}, ['Treffer: Häkchen = wird angezeigt'])]));
+      /* Version 11: alle Häkchen auf einmal setzen oder entfernen (ohne Neuzeichnen, damit Eingaben erhalten bleiben) */
+      var cbs = [];
+      function setAll(on) {
+        res.forEach(function (a) { a.on = on; });
+        cbs.forEach(function (c) { c.checked = on; });
+      }
+      box.appendChild(h('div', {}, [
+        h('button', { class: 'gray', onclick: function () { setAll(false); } }, ['Alle abwählen']),
+        h('button', { class: 'gray', onclick: function () { setAll(true); } }, ['Alle auswählen'])
+      ]));
       res.forEach(function (a) {
         var cb = h('input', { type: 'checkbox' });
         cb.checked = a.on;
+        cbs.push(cb);
         cb.addEventListener('change', function () { a.on = cb.checked; });
         box.appendChild(h('div', { class: 'row' }, [cb, h('img', { src: a.img }), h('span', {}, [a.name + (a.date ? ' (' + a.date.slice(0, 4) + ')' : '')]),
           h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover'])]));
@@ -794,7 +805,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(h('button', { class: 'red', onclick: function () {
         tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
       } }, ['Von Spotify abmelden']));
-      p.appendChild(h('div', {}, [h('small', {}, ['Version 10'])]));
+      p.appendChild(h('div', {}, [h('small', {}, ['Version 11'])]));
     }
     out.push(p);
     return out;
