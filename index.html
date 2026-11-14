@@ -14,6 +14,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .tile:active{transform:translateY(4px);box-shadow:0 1px 0 rgba(0,0,0,.18)}
 .tile img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
 .tile.sel{outline:6px solid #ff8a00}
+.tile .num{position:absolute;right:8px;bottom:8px;background:#ff8a00;color:#fff;font-size:44px;font-weight:800;border-radius:50%;width:72px;height:72px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 rgba(0,0,0,.25)}
+.p .trk{font-size:13px}
+.tile .tname{position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px;font-size:22px;font-weight:700;background:#ffd166;color:#333}
+.p select{font-size:16px;padding:8px;border-radius:10px;margin:4px 0}
 .back{border:0;background:#ff8a00;color:#fff;font-size:54px;line-height:1;width:96px;height:80px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.2);margin:0 0 14px}
 .back:active{transform:translateY(4px)}
 .hint{text-align:center;font-size:18px;padding:40px 20px;color:#777}
@@ -46,7 +50,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   'use strict';
 
   var REDIRECT = location.origin + location.pathname.replace(/index\.html$/, '');
-  var SCOPES = 'user-read-playback-state user-modify-playback-state';
+  var SCOPES = 'user-read-playback-state user-modify-playback-state playlist-read-private';
 
   var DEFAULT_CFG = {
     clientId: '',
@@ -54,7 +58,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     deviceName: '',
     series: [
       { id: 'bibi',  name: 'Bibi und Tina', query: 'Bibi und Tina Folge', filter: 'bibi', cover: null, albums: [] },
-      { id: 'conni', name: 'Conni',         query: 'Conni Folge',         filter: 'conni', cover: null, albums: [] },
+      { id: 'conni', name: 'Conni',         query: 'Conni Folge',         filter: 'conni', cover: null, albums: [], split: true },
       { id: 'peppa', name: 'Peppa Wutz',    query: 'Peppa Wutz',          filter: 'peppa', cover: null, albums: [] }
     ]
   };
@@ -102,6 +106,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     return null;
   }
   function coverOf(s) { return s.cover || (s.albums[0] && s.albums[0].img) || ''; }
+  function uriOf(a) { return a.uri || 'spotify:album:' + a.id; }
+  function tileContent(img, name) {
+    return img ? h('img', { src: img }) : h('span', { class: 'tname' }, [name || '?']);
+  }
 
   /* ---------- Spotify Login (PKCE) ---------- */
   async function login() {
@@ -176,21 +184,104 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function devQ() { return cfg.deviceId ? '?device_id=' + encodeURIComponent(cfg.deviceId) : ''; }
 
   var busy = false;
-  async function play(album) {
+  async function play(album, story) {
     if (busy) return;
     busy = true;
     try {
-      var body = { context_uri: 'spotify:album:' + album.id };
+      var body = { context_uri: uriOf(album) };
+      if (story) body.offset = { position: story.start };
       var r = await api('PUT', '/me/player/play' + devQ(), body);
       if (r.status === 404 && cfg.deviceId) {
         await api('PUT', '/me/player', { device_ids: [cfg.deviceId], play: false });
         await sleep(1000);
         r = await api('PUT', '/me/player/play' + devQ(), body);
       }
-      if (r.ok) { state.now = album; state.playing = true; render(); }
+      if (r.ok) {
+        state.now = album; state.story = story || null; state.playing = true; render();
+        stopInfo = story ? { uri: uriOf(album), album: album, story: story } : null;
+        if (stopInfo) scheduleStop(4000); else clearTimeout(stopTimer);
+      }
       else { toast('😕'); console.log('play status', r.status); }
     } catch (e) { toast('😕'); console.log(e); }
     busy = false;
+  }
+
+  /* Nach einer Geschichte anhalten: rechnet die Restzeit aus und prüft kurz vor Schluss */
+  var stopTimer = null, stopInfo = null;
+  function scheduleStop(ms) { clearTimeout(stopTimer); stopTimer = setTimeout(checkStop, ms); }
+  async function pauseNow() {
+    try { await api('PUT', '/me/player/pause' + devQ()); state.playing = false; render(); } catch (e) { console.log(e); }
+  }
+  async function checkStop() {
+    var info = stopInfo;
+    if (!info) return;
+    try {
+      var r = await api('GET', '/me/player');
+      if (r.status === 204 || !r.ok) { if (r.status === 204) stopInfo = null; else scheduleStop(60000); return; }
+      var j = await r.json();
+      if (!j.context || j.context.uri !== info.uri || !j.item) { stopInfo = null; return; }
+      var a = info.album, st = info.story;
+      var idx = (a.trackIds || []).indexOf(j.item.id);
+      if (idx < 0 && j.item.track_number) idx = j.item.track_number - 1;
+      if (idx < st.start) { stopInfo = null; return; }
+      if (idx > st.end) { if (j.is_playing) await pauseNow(); stopInfo = null; return; }
+      if (!j.is_playing) { scheduleStop(60000); return; }
+      var rem = (j.item.duration_ms || 0) - (j.progress_ms || 0);
+      if (idx === st.end && rem < 15000) {
+        clearTimeout(stopTimer);
+        stopTimer = setTimeout(function () { if (stopInfo === info) { pauseNow(); stopInfo = null; } }, Math.max(rem - 400, 0));
+        return;
+      }
+      for (var k = idx + 1; k <= st.end; k++) rem += (a.trackMs && a.trackMs[k]) || 0;
+      scheduleStop(Math.max(Math.min(rem - 10000, 300000), 2000));
+    } catch (e) { console.log(e); scheduleStop(60000); }
+  }
+
+  /* Titel eines Albums laden und Geschichten erkennen */
+  async function loadTracks(a) {
+    var out = [], url = '/albums/' + a.id + '/tracks?market=DE&limit=50&offset=0';
+    for (var guard = 0; url && guard < 10; guard++) {
+      var r = await api('GET', url);
+      if (!r.ok) throw new Error('Titel laden fehlgeschlagen (' + r.status + ')');
+      var j = await r.json();
+      (j.items || []).forEach(function (t) { out.push({ id: t.id, name: t.name, ms: t.duration_ms || 0 }); });
+      url = j.next ? j.next.replace('https://api.spotify.com/v1', '') : null;
+    }
+    return out;
+  }
+  var PART = /[\s\-–:,(]*\b(teil|kapitel|part|track|abschnitt)\s*\d+\)?/gi;
+  function storyKey(name) {
+    return name.toLowerCase().replace(PART, ' ')
+      .replace(/^\s*\d+[\s.:\-–]*/, '').replace(/[\s\-–:.,]*\d+\s*$/, '')
+      .replace(/[^a-zäöüß ]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function storyName(name) { return name.replace(PART, '').replace(/^\s*\d+[\s.:\-–]*/, '').replace(/^[\s:\-–.,]+/, '').trim() || name; }
+  function detectStarts(tracks) {
+    var starts = [], last = null;
+    tracks.forEach(function (t, i) {
+      var k = storyKey(t.name);
+      if (i === 0 || (k && k !== last)) starts.push(i);
+      if (k) last = k;
+    });
+    return starts;
+  }
+  function buildStories(a, tracks, starts) {
+    starts = starts.filter(function (x, i, arr) { return arr.indexOf(x) === i; }).sort(function (x, y) { return x - y; });
+    if (starts[0] !== 0) starts.unshift(0);
+    a.trackIds = tracks.map(function (t) { return t.id; });
+    a.trackMs = tracks.map(function (t) { return t.ms; });
+    a.stories = starts.map(function (st, i) {
+      return { name: storyName(tracks[st].name), start: st, end: (i + 1 < starts.length ? starts[i + 1] : tracks.length) - 1 };
+    });
+  }
+  async function openAlbum(s, a) {
+    if (!a.stories && uriOf(a).indexOf('spotify:album:') === 0) {
+      toast('⏳');
+      try { var tr = await loadTracks(a); buildStories(a, tr, detectStarts(tr)); saveCfg(); }
+      catch (e) { console.log(e); return play(a); }
+    }
+    if (!a.stories || a.stories.length < 2) return play(a);
+    state.view = 'stories'; state.albumUri = uriOf(a); render(); window.scrollTo(0, 0);
   }
   async function togglePlay() {
     if (busy) return;
@@ -199,17 +290,17 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       var r;
       if (state.playing) r = await api('PUT', '/me/player/pause' + devQ());
       else r = await api('PUT', '/me/player/play' + devQ());
-      if (r.ok) { state.playing = !state.playing; render(); }
+      if (r.ok) { state.playing = !state.playing; render(); if (state.playing && stopInfo) scheduleStop(4000); }
       else toast('😕');
     } catch (e) { toast('😕'); }
     busy = false;
   }
 
   /* Was läuft gerade? (nach Neuladen, wenn die Folge zu Ende ist usw.) */
-  function findAlbum(id) {
+  function findItem(uri) {
     for (var i = 0; i < cfg.series.length; i++)
       for (var k = 0; k < cfg.series[i].albums.length; k++)
-        if (cfg.series[i].albums[k].id === id) return cfg.series[i].albums[k];
+        if (uriOf(cfg.series[i].albums[k]) === uri) return cfg.series[i].albums[k];
     return null;
   }
   async function syncPlayer() {
@@ -220,7 +311,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       if (!r.ok) return;
       var j = await r.json();
       var uri = (j.context && j.context.uri) || '';
-      var a = uri.indexOf('spotify:album:') === 0 ? findAlbum(uri.slice(14)) : null;
+      var a = uri ? findItem(uri) : null;
       if (a) state.now = a;
       state.playing = !!j.is_playing && !!a;
       render();
@@ -231,7 +322,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function nowBar() {
     if (!state.now) return null;
     return h('div', { class: 'now' }, [
-      h('img', { src: state.now.img }),
+      state.now.img ? h('img', { src: state.now.img }) : h('b', {}, [state.now.name]),
       h('div', { class: 'sp' }),
       h('button', { class: 'pp', onclick: togglePlay }, [state.playing ? '⏸' : '▶️'])
     ]);
@@ -255,7 +346,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     }
     return [h('div', { class: 'grid' }, list.map(function (s) {
       return h('button', { class: 'tile', onclick: function () { state.view = 'series'; state.seriesId = s.id; render(); window.scrollTo(0, 0); } },
-        [h('img', { src: coverOf(s) })]);
+        [tileContent(coverOf(s), s.name)]);
     }))];
   }
   function renderSeries() {
@@ -264,8 +355,20 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     return [
       h('button', { class: 'back', onclick: function () { state.view = 'home'; render(); } }, ['⬅']),
       h('div', { class: 'grid' }, s.albums.map(function (a) {
-        return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () { play(a); } },
-          [h('img', { src: a.img })]);
+        return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () { if (s.split) openAlbum(s, a); else play(a); } },
+          [tileContent(a.img, a.name)]);
+      }))
+    ];
+  }
+  function renderStories() {
+    var a = findItem(state.albumUri);
+    if (!a || !a.stories) { state.view = 'series'; return renderSeries(); }
+    return [
+      h('button', { class: 'back', onclick: function () { state.view = 'series'; render(); } }, ['⬅']),
+      h('div', { class: 'grid' }, a.stories.map(function (st, i) {
+        var sel = state.now === a && state.story && state.story.start === st.start;
+        return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () { play(a, st); } },
+          [tileContent(a.img, a.name), h('span', { class: 'num' }, [String(i + 1)])]);
       }))
     ];
   }
@@ -284,14 +387,16 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
   async function search(s) {
     var found = {}, out = [], saved = {}, newest = '';
+    var mode = s.mode || 'album';
     s.albums.forEach(function (a) { saved[a.id] = 1; if ((a.date || '') > newest) newest = a.date || ''; });
     state.msg = 'Suche läuft …'; render();
     try {
-      for (var off = 0; off < 100; off += 10) {
-        var r = await api('GET', '/search?type=album&market=DE&limit=10&offset=' + off + '&q=' + encodeURIComponent(s.query));
+      var max = mode === 'artist' ? 20 : 100;
+      for (var off = 0; off < max; off += 10) {
+        var r = await api('GET', '/search?type=' + mode + '&market=DE&limit=10&offset=' + off + '&q=' + encodeURIComponent(s.query));
         if (!r.ok) { state.msg = 'Suche fehlgeschlagen (' + r.status + ')'; break; }
         var j = await r.json();
-        var items = (j.albums && j.albums.items) || [];
+        var items = ((mode === 'artist' ? j.artists : j.albums) || {}).items || [];
         if (!items.length) break;
         items.forEach(function (a) {
           if (!a || found[a.id]) return;
@@ -299,16 +404,44 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
           var hay = (a.name + ' ' + (a.artists || []).map(function (x) { return x.name; }).join(' ')).toLowerCase();
           var ok = !s.filter || hay.indexOf(s.filter.toLowerCase()) >= 0;
           // schon eingerichtet: Gespeichertes bleibt an, neu erschienene Folgen kommen dazu
-          if (s.albums.length) ok = !!saved[a.id] || (ok && (a.release_date || '') > newest);
-          out.push({ id: a.id, name: a.name, img: (a.images && a.images[0]) ? a.images[0].url : '', date: a.release_date || '', on: ok });
+          if (s.albums.length) ok = !!saved[a.id] || (mode === 'album' && ok && (a.release_date || '') > newest);
+          if (mode === 'artist' && !s.albums.length) ok = false;
+          out.push({ id: a.id, uri: 'spotify:' + mode + ':' + a.id, name: a.name,
+            img: (a.images && a.images[0]) ? a.images[0].url : '', date: a.release_date || '', on: ok });
         });
         if (items.length < 10) break;
       }
       if (out.length) state.msg = out.length + ' Treffer gefunden.';
+      else if (state.msg === 'Suche läuft …') state.msg = 'Keine Treffer. Suchbegriff ändern.';
     } catch (e) { state.msg = 'Fehler: ' + e.message; }
-    state.results[s.id] = sortAlbums(out);
+    state.results[s.id] = mode === 'album' ? sortAlbums(out) : out;
     render();
   }
+
+  /* Spotify-Link (Album, Playlist, Künstler) direkt hinzufügen */
+  async function addLink(s, text) {
+    var m = /(album|playlist|artist)[\/:]([A-Za-z0-9]{22})/.exec(text || '');
+    if (!m) { state.msg = 'Das ist kein Spotify-Link zu einem Album, einer Playlist oder einem Künstler.'; render(); return; }
+    var kind = m[1], id = m[2];
+    var names = { album: 'Album', playlist: 'Playlist', artist: 'Künstler' };
+    var item = { id: id, uri: 'spotify:' + kind + ':' + id, name: names[kind], img: '', date: '', manual: true };
+    try {
+      var path = kind === 'playlist' ? '/playlists/' + id + '?fields=name,images' : '/' + kind + 's/' + id + '?market=DE';
+      var r = await api('GET', path);
+      if (r.ok) {
+        var j = await r.json();
+        item.name = j.name || item.name;
+        item.img = (j.images && j.images[0]) ? j.images[0].url : '';
+        item.date = j.release_date || '';
+      }
+    } catch (e) { console.log(e); }
+    if (s.albums.some(function (a) { return uriOf(a) === item.uri; })) { state.msg = 'Ist schon drin.'; render(); return; }
+    s.albums.push(item);
+    saveCfg();
+    state.msg = s.name + ': „' + item.name + '“ hinzugefügt' + (item.img ? '.' : ' (ohne Bild, die Kachel zeigt dann den Namen).');
+    render();
+  }
+
   async function loadDevices() {
     try {
       var r = await api('GET', '/me/player/devices');
@@ -319,32 +452,147 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     render();
   }
 
+  function moveSeries(s, dir) {
+    var i = cfg.series.indexOf(s), j = i + dir;
+    if (j < 0 || j >= cfg.series.length) return;
+    cfg.series[i] = cfg.series[j]; cfg.series[j] = s;
+    saveCfg(); render();
+  }
+
   function seriesEditor(s) {
     var res = state.results[s.id];
+    var nameIn = h('input', { type: 'text', value: s.name, placeholder: 'Name der Reihe' });
+    var modeSel = h('select', {}, [
+      h('option', { value: 'album' }, ['Alben / Folgen suchen']),
+      h('option', { value: 'artist' }, ['Künstler suchen (spielt seine beliebtesten Lieder)'])
+    ]);
+    modeSel.value = s.mode || 'album';
     var qIn = h('input', { type: 'text', value: s.query, placeholder: 'Suchbegriff' });
-    var fIn = h('input', { type: 'text', value: s.filter, placeholder: 'Filter (Name muss enthalten)' });
+    var fIn = h('input', { type: 'text', value: s.filter, placeholder: 'Filter (leer = alle Treffer)' });
+    var linkIn = h('input', { type: 'text', placeholder: 'Spotify-Link einfügen (Album, Playlist oder Künstler)' });
+    function keep() { s.name = nameIn.value.trim() || s.name; s.mode = modeSel.value; s.query = qIn.value; s.filter = fIn.value; saveCfg(); }
     var box = h('div', { class: 'box' }, [
-      h('b', {}, [s.name]),
-      h('div', {}, [h('small', {}, [s.albums.length + ' Folgen gespeichert'])]),
+      h('div', {}, [h('small', {}, ['Name'])]), nameIn,
+      h('div', {}, [h('small', {}, [s.albums.length + ' Kacheln gespeichert'])]),
+      h('div', {}, [h('small', {}, ['Suchart'])]), modeSel,
       h('div', {}, [h('small', {}, ['Suchbegriff'])]), qIn,
       h('div', {}, [h('small', {}, ['Filter'])]), fIn,
-      h('button', { onclick: function () { s.query = qIn.value; s.filter = fIn.value; saveCfg(); search(s); } }, ['Folgen suchen'])
+      h('button', { onclick: function () { keep(); search(s); } }, ['Suchen']),
+      (function () {
+        var cb = h('input', { type: 'checkbox' });
+        cb.checked = !!s.split;
+        cb.addEventListener('change', function () { s.split = cb.checked; saveCfg(); render(); });
+        return h('label', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0' }, [cb,
+          h('small', {}, ['Mehrere Geschichten pro Folge einzeln anzeigen (hält nach jeder Geschichte an)'])]);
+      })(),
+      h('div', {}, [h('small', {}, ['Oder direkt per Link'])]), linkIn,
+      h('button', { onclick: function () { keep(); addLink(s, linkIn.value); } }, ['Link hinzufügen'])
     ]);
     if (res) {
+      box.appendChild(h('div', {}, [h('small', {}, ['Treffer: Häkchen = wird angezeigt'])]));
       res.forEach(function (a) {
         var cb = h('input', { type: 'checkbox' });
         cb.checked = a.on;
         cb.addEventListener('change', function () { a.on = cb.checked; });
-        box.appendChild(h('div', { class: 'row' }, [cb, h('img', { src: a.img }), h('span', {}, [a.name + ' (' + a.date.slice(0, 4) + ')']),
+        box.appendChild(h('div', { class: 'row' }, [cb, h('img', { src: a.img }), h('span', {}, [a.name + (a.date ? ' (' + a.date.slice(0, 4) + ')' : '')]),
           h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover'])]));
       });
       box.appendChild(h('button', { onclick: function () {
-        s.albums = res.filter(function (a) { return a.on; }).map(function (a) { return { id: a.id, name: a.name, img: a.img, date: a.date }; });
-        sortAlbums(s.albums);
-        saveCfg(); delete state.results[s.id]; state.msg = s.name + ': ' + s.albums.length + ' Folgen gespeichert.'; render();
+        var inRes = {};
+        res.forEach(function (a) { inRes[a.id] = 1; });
+        var others = s.albums.filter(function (a) { return !inRes[a.id]; });
+        var picked = res.filter(function (a) { return a.on; }).map(function (a) { return { id: a.id, uri: a.uri, name: a.name, img: a.img, date: a.date }; });
+        s.albums = others.concat(picked);
+        if ((s.mode || 'album') === 'album') sortAlbums(s.albums);
+        keep(); delete state.results[s.id]; state.msg = s.name + ': ' + s.albums.length + ' Kacheln gespeichert.'; render();
       } }, ['Auswahl übernehmen']));
     }
+    // gespeicherte Kacheln ansehen, entfernen, als Cover wählen
+    var open = state.showSaved && state.showSaved[s.id];
+    box.appendChild(h('button', { class: 'gray', onclick: function () {
+      state.showSaved = state.showSaved || {}; state.showSaved[s.id] = !open; render();
+    } }, [open ? 'Gespeicherte ausblenden' : 'Gespeicherte anzeigen (' + s.albums.length + ')']));
+    if (open) {
+      s.albums.forEach(function (a) {
+        var isAlbum = uriOf(a).indexOf('spotify:album:') === 0;
+        box.appendChild(h('div', { class: 'row' }, [h('img', { src: a.img }),
+          h('span', {}, [a.name + (s.split && a.stories ? ' – ' + a.stories.length + ' Geschichten' : '')]),
+          (s.split && isAlbum) ? h('button', { onclick: function () { editStories(s, a); } }, ['Geschichten']) : null,
+          h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover']),
+          h('button', { class: 'red', onclick: function () {
+            s.albums = s.albums.filter(function (x) { return x !== a; }); saveCfg(); render();
+          } }, ['✕'])]));
+        var se = state.storyEdit;
+        if (se && se.album === a) box.appendChild(storyEditor(s, a, se));
+      });
+    }
+    box.appendChild(h('div', {}, [
+      h('button', { class: 'gray', onclick: function () { moveSeries(s, -1); } }, ['↑ nach vorne']),
+      h('button', { class: 'gray', onclick: function () { moveSeries(s, 1); } }, ['↓ nach hinten']),
+      h('button', { class: 'red', onclick: function () {
+        if (!confirm('Reihe „' + s.name + '“ wirklich löschen?')) return;
+        cfg.series = cfg.series.filter(function (x) { return x !== s; }); saveCfg(); state.msg = 'Reihe gelöscht.'; render();
+      } }, ['Reihe löschen'])
+    ]));
     return box;
+  }
+
+  async function editStories(s, a) {
+    state.msg = 'Lade Titel …'; render();
+    try {
+      var tracks = await loadTracks(a);
+      var starts = a.stories && a.trackIds && a.trackIds.length === tracks.length
+        ? a.stories.map(function (x) { return x.start; }) : detectStarts(tracks);
+      state.storyEdit = { album: a, tracks: tracks, starts: starts };
+      state.msg = '';
+    } catch (e) { state.msg = 'Fehler: ' + e.message; }
+    render();
+  }
+  function fmt(ms) { var sec = Math.round(ms / 1000); return Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2); }
+  function storyEditor(s, a, se) {
+    var b = h('div', { class: 'box', style: 'background:#fff7e8' }, [
+      h('b', {}, ['Geschichten in „' + a.name + '“']),
+      h('div', {}, [h('small', {}, ['Häkchen = hier beginnt eine neue Geschichte'])])
+    ]);
+    se.tracks.forEach(function (t, i) {
+      var cb = h('input', { type: 'checkbox' });
+      cb.checked = i === 0 || se.starts.indexOf(i) >= 0;
+      cb.disabled = i === 0;
+      cb.addEventListener('change', function () {
+        se.starts = se.starts.filter(function (x) { return x !== i; });
+        if (cb.checked) se.starts.push(i);
+      });
+      b.appendChild(h('div', { class: 'row trk' }, [cb, h('span', {}, [(i + 1) + '. ' + t.name + ' (' + fmt(t.ms) + ')'])]));
+    });
+    b.appendChild(h('button', { onclick: function () {
+      buildStories(a, se.tracks, se.starts); saveCfg(); state.storyEdit = null;
+      state.msg = a.name + ': ' + a.stories.length + ' Geschichten gespeichert.'; render();
+    } }, ['Speichern']));
+    b.appendChild(h('button', { class: 'gray', onclick: function () { se.starts = detectStarts(se.tracks); render(); } }, ['Automatisch erkennen']));
+    b.appendChild(h('button', { class: 'gray', onclick: function () { state.storyEdit = null; render(); } }, ['Abbrechen']));
+    return b;
+  }
+
+  function newSeriesBox() {
+    var nIn = h('input', { type: 'text', placeholder: 'z. B. Pettersson und Findus oder Rolf Zuckowski' });
+    var mSel = h('select', {}, [
+      h('option', { value: 'album' }, ['Hörspielreihe / Alben']),
+      h('option', { value: 'artist' }, ['Lieder eines Künstlers'])
+    ]);
+    return h('div', { class: 'box' }, [
+      h('b', {}, ['Neue Reihe hinzufügen']),
+      h('div', {}, [h('small', {}, ['Name'])]), nIn,
+      h('div', {}, [h('small', {}, ['Art'])]), mSel,
+      h('button', { onclick: function () {
+        var name = nIn.value.trim();
+        if (!name) return;
+        var s = { id: 's' + Date.now(), name: name, mode: mSel.value, query: name, filter: '', cover: null, albums: [] };
+        cfg.series.push(s); saveCfg();
+        state.msg = '„' + name + '“ angelegt. Unten bei der Reihe auf „Suchen“ tippen oder einen Spotify-Link einfügen.';
+        render();
+        search(s);
+      } }, ['Anlegen und suchen'])
+    ]);
   }
 
   function renderParent() {
@@ -379,7 +627,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(dbox);
 
       // 3. Hörspielreihen
-      p.appendChild(h('h2', {}, ['3. Hörspielreihen']));
+      p.appendChild(h('h2', {}, ['3. Hörspielreihen und Musik']));
+      p.appendChild(newSeriesBox());
       cfg.series.forEach(function (s) { p.appendChild(seriesEditor(s)); });
 
       p.appendChild(h('h2', {}, ['Sonstiges']));
@@ -397,6 +646,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var parts;
     if (state.view === 'parent') parts = renderParent();
     else if (state.view === 'series') parts = renderSeries();
+    else if (state.view === 'stories') parts = renderStories();
     else parts = renderHome();
     parts.forEach(function (n) { root.appendChild(n); });
     if (state.view !== 'parent') {
