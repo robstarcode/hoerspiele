@@ -77,6 +77,16 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function saveCfg() { localStorage.setItem('hs_cfg', JSON.stringify(cfg)); }
   function saveTok() { localStorage.setItem('hs_tok', JSON.stringify(tok)); }
 
+  /* Version 7: Einstellungen aus der Zeit vor Version 5 kennen die Geschichten-Option noch nicht.
+     Bei Conni wird sie dann eingeschaltet (ein bewusst entfernter Haken bleibt entfernt). */
+  (function migrate() {
+    var changed = false;
+    (cfg.series || []).forEach(function (s) {
+      if (s.id === 'conni' && s.split === undefined) { s.split = true; changed = true; }
+    });
+    if (changed) saveCfg();
+  })();
+
   var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '' };
 
   var root = document.getElementById('app');
@@ -113,6 +123,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
   function coverOf(s) { return s.cover || (s.albums[0] && s.albums[0].img) || ''; }
   function uriOf(a) { return a.uri || 'spotify:album:' + a.id; }
+  function isAlbum(a) { return uriOf(a).indexOf('spotify:album:') === 0; }
   function tileContent(img, name) {
     return img ? h('img', { src: img }) : h('span', { class: 'tname' }, [name || '?']);
   }
@@ -287,18 +298,29 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     }
     return out;
   }
+  var SV = 2; // Version der automatischen Erkennung; ältere automatische Ergebnisse werden einmal neu berechnet
   var PART = /[\s\-–:,(]*\b(teil|kapitel|part|track|abschnitt)\s*\d+\)?/gi;
+  var INTRO = /intro|vorspann|titelsong|titellied|theme ?song/i;
+  var OUTRO = /outro|abspann/i;
   function storyKey(name) {
-    return name.toLowerCase().replace(PART, ' ')
+    var br = /\[([^\]]+)\]/.exec(name);          // „In der Schule [Conni und der verschwundene Hund]“
+    if (br) name = br[1];
+    return name.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(PART, ' ')   // „(Version 2025)“, „(3 Minutes Digital Version)“
       .replace(/^\s*\d+[\s.:\-–]*/, '').replace(/[\s\-–:.,]*\d+\s*$/, '')
       .replace(/[^a-zäöüß ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
   function storyName(name) { return name.replace(PART, '').replace(/^\s*\d+[\s.:\-–]*/, '').replace(/^[\s:\-–.,]+/, '').trim() || name; }
+  /* Liefert die Titel-Positionen, an denen eine Geschichte beginnt.
+     Intro-Lied gehört zur Geschichte danach, Outro-Lied zur Geschichte davor. */
   function detectStarts(tracks) {
-    var starts = [], last = null;
+    var starts = [0], last = null, open = true; // open = die nächste Geschichte hat ihren Startpunkt schon
     tracks.forEach(function (t, i) {
-      var k = storyKey(t.name);
-      if (i === 0 || (k && k !== last)) starts.push(i);
+      var n = t.name || '';
+      if (OUTRO.test(n) || (i > 0 && i === tracks.length - 1 && INTRO.test(n))) return;
+      if (INTRO.test(n)) { if (i > 0 && !open) starts.push(i); open = true; last = null; return; }
+      var k = storyKey(n);
+      if (open) { open = false; if (k) last = k; return; }
+      if (k && k !== last) starts.push(i);
       if (k) last = k;
     });
     return starts;
@@ -308,15 +330,27 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     if (starts[0] !== 0) starts.unshift(0);
     a.trackIds = tracks.map(function (t) { return t.id; });
     a.trackMs = tracks.map(function (t) { return t.ms; });
+    a.sv = SV;
     a.stories = starts.map(function (st, i) {
-      return { name: storyName(tracks[st].name), start: st, end: (i + 1 < starts.length ? starts[i + 1] : tracks.length) - 1 };
+      var first = st;
+      while (first < tracks.length - 1 && INTRO.test(tracks[first].name || '')) first++;
+      return { name: storyName(tracks[first].name), start: st, end: (i + 1 < starts.length ? starts[i + 1] : tracks.length) - 1 };
     });
   }
+  var loadingAlbum = false;
   async function openAlbum(s, a) {
-    if (!a.stories && uriOf(a).indexOf('spotify:album:') === 0) {
+    if (loadingAlbum || busy) return;
+    if (isAlbum(a) && (!a.stories || (!a.manualStories && a.sv !== SV))) {
+      loadingAlbum = true;
       toast('⏳');
       try { var tr = await loadTracks(a); buildStories(a, tr, detectStarts(tr)); saveCfg(); }
-      catch (e) { console.log(e); return play(a); }
+      catch (e) {
+        console.log(e);
+        state.msg = 'Bei „' + a.name + '“ konnten die Geschichten nicht geladen werden: ' + e.message;
+        loadingAlbum = false;
+        return play(a);
+      }
+      loadingAlbum = false;
     }
     if (!a.stories || a.stories.length < 2) return play(a);
     state.view = 'stories'; state.albumUri = uriOf(a); render(); window.scrollTo(0, 0);
@@ -561,10 +595,9 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     } }, [open ? 'Gespeicherte ausblenden' : 'Gespeicherte anzeigen (' + s.albums.length + ')']));
     if (open) {
       s.albums.forEach(function (a) {
-        var isAlbum = uriOf(a).indexOf('spotify:album:') === 0;
         box.appendChild(h('div', { class: 'row' }, [h('img', { src: a.img }),
           h('span', {}, [a.name + (s.split && a.stories ? ' – ' + a.stories.length + ' Geschichten' : '')]),
-          (s.split && isAlbum) ? h('button', { onclick: function () { editStories(s, a); } }, ['Geschichten']) : null,
+          (s.split && isAlbum(a)) ? h('button', { onclick: function () { editStories(s, a); } }, ['Geschichten']) : null,
           h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover']),
           h('button', { class: 'red', onclick: function () {
             s.albums = s.albums.filter(function (x) { return x !== a; }); saveCfg(); render();
@@ -588,8 +621,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     state.msg = 'Lade Titel …'; render();
     try {
       var tracks = await loadTracks(a);
-      var starts = a.stories && a.trackIds && a.trackIds.length === tracks.length
-        ? a.stories.map(function (x) { return x.start; }) : detectStarts(tracks);
+      var keepOld = a.stories && a.trackIds && a.trackIds.length === tracks.length && (a.manualStories || a.sv === SV);
+      var starts = keepOld ? a.stories.map(function (x) { return x.start; }) : detectStarts(tracks);
       state.storyEdit = { album: a, tracks: tracks, starts: starts };
       state.msg = '';
     } catch (e) { state.msg = 'Fehler: ' + e.message; }
@@ -599,7 +632,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function storyEditor(s, a, se) {
     var b = h('div', { class: 'box', style: 'background:#fff7e8' }, [
       h('b', {}, ['Geschichten in „' + a.name + '“']),
-      h('div', {}, [h('small', {}, ['Häkchen = hier beginnt eine neue Geschichte'])])
+      h('div', {}, [h('small', {}, ['Häkchen = hier beginnt eine neue Geschichte. Intro- und Outro-Lied zählt die automatische Erkennung zur Geschichte danach bzw. davor.'])])
     ]);
     se.tracks.forEach(function (t, i) {
       var cb = h('input', { type: 'checkbox' });
@@ -612,7 +645,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       b.appendChild(h('div', { class: 'row trk' }, [cb, h('span', {}, [(i + 1) + '. ' + t.name + ' (' + fmt(t.ms) + ')'])]));
     });
     b.appendChild(h('button', { onclick: function () {
-      buildStories(a, se.tracks, se.starts); saveCfg(); state.storyEdit = null;
+      buildStories(a, se.tracks, se.starts); a.manualStories = true; saveCfg(); state.storyEdit = null;
       state.msg = a.name + ': ' + a.stories.length + ' Geschichten gespeichert.'; render();
     } }, ['Speichern']));
     b.appendChild(h('button', { class: 'gray', onclick: function () { se.starts = detectStarts(se.tracks); render(); } }, ['Automatisch erkennen']));
@@ -689,6 +722,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(h('button', { class: 'red', onclick: function () {
         tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
       } }, ['Von Spotify abmelden']));
+      p.appendChild(h('div', {}, [h('small', {}, ['Version 7'])]));
     }
     out.push(p);
     return out;
