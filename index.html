@@ -75,6 +75,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .p .row img{width:44px;height:44px;border-radius:8px;object-fit:cover}
 .p .row span{flex:1;font-size:14px}
 .p small{color:#666}
+/* Version 14: Elternsperre mit Rechenaufgabe */
+.gate .q{font-size:30px;font-weight:700;margin:6px 0 12px}
+.gate input[type=text]{font-size:26px;text-align:center}
+.gate .err{color:#c0392b;margin-top:6px}
 </style>
 </head>
 <body>
@@ -118,7 +122,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     if (changed) saveCfg();
   })();
 
-  var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '', backTo: 'home', lockUntil: 0 };
+  var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '', backTo: 'home', lockUntil: 0, gate: null };
 
   var root = document.getElementById('app');
 
@@ -148,6 +152,11 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
+  function randomStr(n) {
+    var r = new Uint8Array(n);
+    crypto.getRandomValues(r);
+    return b64url(r);
+  }
   function findSeries(id) {
     for (var i = 0; i < cfg.series.length; i++) if (cfg.series[i].id === id) return cfg.series[i];
     return null;
@@ -162,15 +171,17 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function locked() { return Date.now() < (state.lockUntil || 0); }
 
   /* ---------- Spotify Login (PKCE) ---------- */
+  /* Version 14: zusätzlich ein zufälliger „state“-Wert. Die Rückkehr von Spotify wird nur angenommen,
+     wenn sie zu einer Anmeldung passt, die auf diesem Gerät gestartet wurde. */
   async function login() {
-    var rnd = new Uint8Array(48);
-    crypto.getRandomValues(rnd);
-    var ver = b64url(rnd);
+    var ver = randomStr(48);
+    var st = randomStr(16);
     localStorage.setItem('hs_ver', ver);
+    localStorage.setItem('hs_state', st);
     var hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ver));
     location.href = 'https://accounts.spotify.com/authorize?' + form({
       client_id: cfg.clientId, response_type: 'code', redirect_uri: REDIRECT,
-      scope: SCOPES, code_challenge_method: 'S256', code_challenge: b64url(hash)
+      scope: SCOPES, code_challenge_method: 'S256', code_challenge: b64url(hash), state: st
     });
   }
   async function tokenCall(params) {
@@ -186,18 +197,27 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var p = new URLSearchParams(location.search);
     var code = p.get('code');
     var err = p.get('error');
+    if (!code && !err) return;
+    var expected = localStorage.getItem('hs_state');
+    var ver = localStorage.getItem('hs_ver') || '';
+    // Einmalwerte sofort löschen, sie werden nach diesem Schritt nicht mehr gebraucht
+    localStorage.removeItem('hs_state');
+    localStorage.removeItem('hs_ver');
+    history.replaceState({}, '', REDIRECT);
+    if (!expected || p.get('state') !== expected) {
+      // nicht von diesem Gerät gestartet: nichts annehmen, Kinderansicht bleibt
+      state.msg = 'Eine Spotify-Anmeldung wurde aus Sicherheitsgründen abgelehnt, weil sie nicht auf diesem Gerät gestartet wurde. Bei Bedarf unten neu verbinden.';
+      return;
+    }
+    state.view = 'parent';
     if (code) {
       try {
         await tokenCall({ client_id: cfg.clientId, grant_type: 'authorization_code', code: code,
-          redirect_uri: REDIRECT, code_verifier: localStorage.getItem('hs_ver') || '' });
+          redirect_uri: REDIRECT, code_verifier: ver });
         state.msg = 'Mit Spotify verbunden.';
       } catch (e) { state.msg = 'Login fehlgeschlagen: ' + e.message; }
-      history.replaceState({}, '', REDIRECT);
-      state.view = 'parent';
-    } else if (err) {
+    } else {
       state.msg = 'Login abgebrochen: ' + err;
-      history.replaceState({}, '', REDIRECT);
-      state.view = 'parent';
     }
   }
   async function getToken() {
@@ -274,7 +294,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
   function leavePlayer() {
     state.view = state.backTo || 'home';
-    if (state.view === 'player' || state.view === 'parent') state.view = 'home';
+    if (state.view === 'player' || state.view === 'parent' || state.view === 'gate') state.view = 'home';
     state.lockUntil = Date.now() + 500; // kein versehentliches Antippen der Kachel unter dem Finger
     render();
     window.scrollTo(0, 0);
@@ -450,7 +470,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     return null;
   }
   async function syncPlayer() {
-    if (!tok.refresh || busy || state.view === 'parent' || document.hidden) return;
+    if (!tok.refresh || busy || state.view === 'parent' || state.view === 'gate' || document.hidden) return;
     try {
       var r = await api('GET', '/me/player');
       if (r.status === 204) { state.playing = false; render(); return; }
@@ -481,7 +501,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   }
   function gearLongPress(inBar) {
     var timer = null;
-    function start(e) { timer = setTimeout(function () { state.view = 'parent'; render(); }, 1800); }
+    function start(e) { timer = setTimeout(openGate, 1800); }
     function stop() { clearTimeout(timer); }
     var g = h('div', { class: inBar ? 'gear in' : 'gear' }, ['⚙️']);
     g.addEventListener('touchstart', start);
@@ -576,6 +596,67 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
         h('div', { class: 'side' }, [gearLongPress(true)])
       ])
     ])];
+  }
+
+  /* ---------- Elternsperre (Version 14) ----------
+     Nach dem langen Drücken auf das Zahnrad kommt eine Rechenaufgabe mit zwei zweistelligen Zahlen.
+     Ein Kind, das weder lesen noch rechnen kann, kommt so nicht in den Elternbereich.
+     Jede Aufgabe ist neu und zufällig, man kann sich also kein Ergebnis merken. */
+  function newTask(g) {
+    g.a = 11 + Math.floor(Math.random() * 39);
+    g.b = 11 + Math.floor(Math.random() * 39);
+    g.val = '';
+  }
+  function openGate() {
+    if (state.view === 'parent' || state.view === 'gate') return;
+    var g = { back: state.view, err: false };
+    newTask(g);
+    state.gate = g;
+    state.view = 'gate';
+    state.lockUntil = Date.now() + 600; // Finger, der noch auf dem Zahnrad liegt, löst nichts aus
+    render();
+    window.scrollTo(0, 0);
+  }
+  function closeGate() {
+    if (locked()) return;
+    var back = state.gate ? state.gate.back : 'home';
+    state.gate = null;
+    state.view = (back === 'parent' || back === 'gate') ? 'home' : back;
+    state.lockUntil = Date.now() + 500;
+    render();
+    window.scrollTo(0, 0);
+  }
+  function renderGate() {
+    var g = state.gate;
+    if (!g) { state.view = 'home'; return renderHome(); }
+    var inp = h('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', autocorrect: 'off', placeholder: 'Ergebnis' });
+    inp.value = g.val || '';
+    inp.addEventListener('input', function () { g.val = inp.value; });
+    function check() {
+      if (locked()) return;
+      if (parseInt((inp.value || '').trim(), 10) === g.a + g.b) {
+        state.gate = null;
+        state.view = 'parent';
+        render();
+        window.scrollTo(0, 0);
+      } else {
+        newTask(g); g.err = true; render();
+      }
+    }
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') check(); });
+    return [
+      h('div', { class: 'topbar' }, [h('button', { class: 'back', onclick: closeGate }, ['⬅'])]),
+      h('div', { class: 'p gate' }, [
+        h('div', { class: 'box' }, [
+          h('b', {}, ['Elternbereich']),
+          h('div', {}, [h('small', {}, ['Bitte die Aufgabe lösen:'])]),
+          h('div', { class: 'q' }, [g.a + ' + ' + g.b + ' =']),
+          inp,
+          h('button', { onclick: check }, ['Öffnen']),
+          g.err ? h('div', { class: 'err' }, ['Leider falsch – hier ist eine neue Aufgabe.']) : null
+        ])
+      ])
+    ];
   }
 
   /* ---------- Elternbereich ---------- */
@@ -893,7 +974,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
         p.appendChild(section(s.id, coverOf(s), s.name, sub, function () { return seriesEditor(s); }));
       });
 
-      p.appendChild(h('div', { style: 'margin-top:20px' }, [h('small', {}, ['Version 13'])]));
+      p.appendChild(h('div', { style: 'margin-top:20px' }, [h('small', {}, ['Version 14'])]));
     }
     out.push(p);
     return out;
@@ -902,6 +983,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   /* ---------- Rendering ---------- */
   function renderView() {
     if (state.view === 'parent') return renderParent();
+    if (state.view === 'gate') return renderGate();
     if (state.view === 'player') return renderPlayer();
     if (state.view === 'series') return renderSeries();
     if (state.view === 'stories') return renderStories();
@@ -912,7 +994,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     root.innerHTML = '';
     var parts = renderView();
     parts.forEach(function (n) { if (n) root.appendChild(n); });
-    if (state.view !== 'parent' && state.view !== 'player') {
+    if (state.view !== 'parent' && state.view !== 'player' && state.view !== 'gate') {
       var nb = nowBar();
       if (nb) root.appendChild(nb);
       else root.appendChild(gearLongPress());
