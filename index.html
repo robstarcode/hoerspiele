@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Hörspiele</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helvetica,Arial,sans-serif;color:#333;touch-action:manipulation}
+#app{min-height:100%;padding:14px 14px 150px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (orientation:landscape){.grid{grid-template-columns:repeat(4,1fr)}}
+.tile{border:0;padding:0;background:#fff;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.18);overflow:hidden;width:100%;display:block;position:relative;height:0;padding-top:100%}
+.tile:active{transform:translateY(4px);box-shadow:0 1px 0 rgba(0,0,0,.18)}
+.tile img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+.tile.sel{outline:6px solid #ff8a00}
+.back{border:0;background:#ff8a00;color:#fff;font-size:54px;line-height:1;width:96px;height:80px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.2);margin:0 0 14px}
+.back:active{transform:translateY(4px)}
+.hint{text-align:center;font-size:18px;padding:40px 20px;color:#777}
+.gear{position:fixed;right:0;bottom:0;width:70px;height:70px;opacity:.12;font-size:34px;display:flex;align-items:center;justify-content:center;z-index:5}
+.now{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top-left-radius:26px;border-top-right-radius:26px;box-shadow:0 -4px 14px rgba(0,0,0,.18);padding:12px 16px calc(12px + env(safe-area-inset-bottom));display:flex;align-items:center;gap:16px;z-index:4}
+.now img{width:84px;height:84px;border-radius:16px;object-fit:cover}
+.now .sp{flex:1}
+.pp{border:0;background:#2bb673;color:#fff;font-size:52px;width:110px;height:84px;border-radius:24px;box-shadow:0 5px 0 rgba(0,0,0,.2)}
+.pp:active{transform:translateY(4px)}
+.toast{position:fixed;left:50%;top:20px;transform:translateX(-50%);background:#fff;border-radius:20px;padding:14px 22px;font-size:40px;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:9}
+/* Elternbereich */
+.p{font-size:16px;-webkit-user-select:text;user-select:text}
+.p h2{margin:22px 0 8px;font-size:20px}
+.p input[type=text]{width:100%;font-size:16px;padding:10px;border:1px solid #bbb;border-radius:10px;margin:4px 0}
+.p button{font-size:16px;padding:10px 14px;border-radius:10px;border:0;background:#2b6fb6;color:#fff;margin:4px 6px 4px 0}
+.p button.gray{background:#888}
+.p button.red{background:#c0392b}
+.p .box{background:#fff;border-radius:14px;padding:12px;margin:10px 0}
+.p code{background:#eee;padding:2px 5px;border-radius:5px;word-break:break-all}
+.p .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee}
+.p .row img{width:44px;height:44px;border-radius:8px;object-fit:cover}
+.p .row span{flex:1;font-size:14px}
+.p small{color:#666}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function () {
+  'use strict';
+
+  var REDIRECT = location.origin + location.pathname.replace(/index\.html$/, '');
+  var SCOPES = 'user-read-playback-state user-modify-playback-state';
+
+  var DEFAULT_CFG = {
+    clientId: '',
+    deviceId: null,
+    deviceName: '',
+    series: [
+      { id: 'bibi',  name: 'Bibi und Tina', query: 'Bibi und Tina Folge', filter: 'bibi', cover: null, albums: [] },
+      { id: 'conni', name: 'Conni',         query: 'Conni Folge',         filter: 'conni', cover: null, albums: [] },
+      { id: 'peppa', name: 'Peppa Wutz',    query: 'Peppa Wutz',          filter: 'peppa', cover: null, albums: [] }
+    ]
+  };
+
+  function load(k, d) {
+    try { var v = JSON.parse(localStorage.getItem(k)); return v || d; } catch (e) { return d; }
+  }
+  var cfg = load('hs_cfg', DEFAULT_CFG);
+  var tok = load('hs_tok', {});
+  function saveCfg() { localStorage.setItem('hs_cfg', JSON.stringify(cfg)); }
+  function saveTok() { localStorage.setItem('hs_tok', JSON.stringify(tok)); }
+
+  var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '' };
+
+  var root = document.getElementById('app');
+
+  /* ---------- kleine Helfer ---------- */
+  function h(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (k === 'class') e.className = v;
+      else if (k.slice(0, 2) === 'on') e.addEventListener(k.slice(2), v);
+      else if (k === 'style') e.style.cssText = v;
+      else if (v !== false && v != null) e.setAttribute(k, v);
+    });
+    (kids || []).forEach(function (c) {
+      if (c == null) return;
+      e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return e;
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function form(o) {
+    return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&');
+  }
+  function b64url(buf) {
+    var s = '', b = new Uint8Array(buf);
+    for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function findSeries(id) {
+    for (var i = 0; i < cfg.series.length; i++) if (cfg.series[i].id === id) return cfg.series[i];
+    return null;
+  }
+  function coverOf(s) { return s.cover || (s.albums[0] && s.albums[0].img) || ''; }
+
+  /* ---------- Spotify Login (PKCE) ---------- */
+  async function login() {
+    var rnd = new Uint8Array(48);
+    crypto.getRandomValues(rnd);
+    var ver = b64url(rnd);
+    localStorage.setItem('hs_ver', ver);
+    var hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ver));
+    location.href = 'https://accounts.spotify.com/authorize?' + form({
+      client_id: cfg.clientId, response_type: 'code', redirect_uri: REDIRECT,
+      scope: SCOPES, code_challenge_method: 'S256', code_challenge: b64url(hash)
+    });
+  }
+  async function tokenCall(params) {
+    var r = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form(params)
+    });
+    var j = await r.json();
+    if (!j.access_token) throw new Error(j.error_description || j.error || 'Token-Fehler');
+    tok = { access: j.access_token, refresh: j.refresh_token || tok.refresh, exp: Date.now() + j.expires_in * 1000 };
+    saveTok();
+  }
+  async function handleRedirect() {
+    var p = new URLSearchParams(location.search);
+    var code = p.get('code');
+    var err = p.get('error');
+    if (code) {
+      try {
+        await tokenCall({ client_id: cfg.clientId, grant_type: 'authorization_code', code: code,
+          redirect_uri: REDIRECT, code_verifier: localStorage.getItem('hs_ver') || '' });
+        state.msg = 'Mit Spotify verbunden.';
+      } catch (e) { state.msg = 'Login fehlgeschlagen: ' + e.message; }
+      history.replaceState({}, '', REDIRECT);
+      state.view = 'parent';
+    } else if (err) {
+      state.msg = 'Login abgebrochen: ' + err;
+      history.replaceState({}, '', REDIRECT);
+      state.view = 'parent';
+    }
+  }
+  async function getToken() {
+    if (tok.access && tok.exp > Date.now() + 60000) return tok.access;
+    if (tok.refresh) {
+      try {
+        await tokenCall({ client_id: cfg.clientId, grant_type: 'refresh_token', refresh_token: tok.refresh });
+      } catch (e) {
+        if (/invalid|revoked|expired/i.test(e.message)) {
+          tok = {}; saveTok();
+          state.msg = 'Die Spotify-Verbindung ist abgelaufen. Bitte unten neu verbinden.';
+        }
+        throw e;
+      }
+      return tok.access;
+    }
+    throw new Error('Nicht angemeldet');
+  }
+  async function api(method, path, body) {
+    var t = await getToken();
+    var opt = { method: method, headers: { Authorization: 'Bearer ' + t } };
+    if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch('https://api.spotify.com/v1' + path, opt);
+  }
+
+  /* ---------- Abspielen ---------- */
+  var toastEl = null;
+  function toast(text) {
+    if (toastEl) toastEl.remove();
+    toastEl = h('div', { class: 'toast' }, [text]);
+    document.body.appendChild(toastEl);
+    setTimeout(function () { if (toastEl) { toastEl.remove(); toastEl = null; } }, 2500);
+  }
+  function devQ() { return cfg.deviceId ? '?device_id=' + encodeURIComponent(cfg.deviceId) : ''; }
+
+  var busy = false;
+  async function play(album) {
+    if (busy) return;
+    busy = true;
+    try {
+      var body = { context_uri: 'spotify:album:' + album.id };
+      var r = await api('PUT', '/me/player/play' + devQ(), body);
+      if (r.status === 404 && cfg.deviceId) {
+        await api('PUT', '/me/player', { device_ids: [cfg.deviceId], play: false });
+        await sleep(1000);
+        r = await api('PUT', '/me/player/play' + devQ(), body);
+      }
+      if (r.ok) { state.now = album; state.playing = true; render(); }
+      else { toast('😕'); console.log('play status', r.status); }
+    } catch (e) { toast('😕'); console.log(e); }
+    busy = false;
+  }
+  async function togglePlay() {
+    if (busy) return;
+    busy = true;
+    try {
+      var r;
+      if (state.playing) r = await api('PUT', '/me/player/pause' + devQ());
+      else r = await api('PUT', '/me/player/play' + devQ());
+      if (r.ok) { state.playing = !state.playing; render(); }
+      else toast('😕');
+    } catch (e) { toast('😕'); }
+    busy = false;
+  }
+
+  /* Was läuft gerade? (nach Neuladen, wenn die Folge zu Ende ist usw.) */
+  function findAlbum(id) {
+    for (var i = 0; i < cfg.series.length; i++)
+      for (var k = 0; k < cfg.series[i].albums.length; k++)
+        if (cfg.series[i].albums[k].id === id) return cfg.series[i].albums[k];
+    return null;
+  }
+  async function syncPlayer() {
+    if (!tok.refresh || busy || state.view === 'parent' || document.hidden) return;
+    try {
+      var r = await api('GET', '/me/player');
+      if (r.status === 204) { state.playing = false; render(); return; }
+      if (!r.ok) return;
+      var j = await r.json();
+      var uri = (j.context && j.context.uri) || '';
+      var a = uri.indexOf('spotify:album:') === 0 ? findAlbum(uri.slice(14)) : null;
+      if (a) state.now = a;
+      state.playing = !!j.is_playing && !!a;
+      render();
+    } catch (e) { console.log(e); }
+  }
+
+  /* ---------- Kinder-Ansicht ---------- */
+  function nowBar() {
+    if (!state.now) return null;
+    return h('div', { class: 'now' }, [
+      h('img', { src: state.now.img }),
+      h('div', { class: 'sp' }),
+      h('button', { class: 'pp', onclick: togglePlay }, [state.playing ? '⏸' : '▶️'])
+    ]);
+  }
+  function gearLongPress() {
+    var timer = null;
+    function start(e) { timer = setTimeout(function () { state.view = 'parent'; render(); }, 1800); }
+    function stop() { clearTimeout(timer); }
+    var g = h('div', { class: 'gear' }, ['⚙️']);
+    g.addEventListener('touchstart', start);
+    g.addEventListener('touchend', stop);
+    g.addEventListener('touchcancel', stop);
+    g.addEventListener('mousedown', start);
+    g.addEventListener('mouseup', stop);
+    return g;
+  }
+  function renderHome() {
+    var list = cfg.series.filter(function (s) { return s.albums.length; });
+    if (!list.length) {
+      return [h('div', { class: 'hint' }, ['Noch keine Hörspiele eingerichtet. Zum Einrichten das Zahnrad unten rechts 2 Sekunden gedrückt halten.'])];
+    }
+    return [h('div', { class: 'grid' }, list.map(function (s) {
+      return h('button', { class: 'tile', onclick: function () { state.view = 'series'; state.seriesId = s.id; render(); window.scrollTo(0, 0); } },
+        [h('img', { src: coverOf(s) })]);
+    }))];
+  }
+  function renderSeries() {
+    var s = findSeries(state.seriesId);
+    if (!s) { state.view = 'home'; return renderHome(); }
+    return [
+      h('button', { class: 'back', onclick: function () { state.view = 'home'; render(); } }, ['⬅']),
+      h('div', { class: 'grid' }, s.albums.map(function (a) {
+        return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () { play(a); } },
+          [h('img', { src: a.img })]);
+      }))
+    ];
+  }
+
+  /* ---------- Elternbereich ---------- */
+  function epNum(name) {
+    var m = /(?:folge|fol\.?|episode|teil|nr\.?)\s*(\d+)/i.exec(name) || /\b(\d{1,3})\b/.exec(name);
+    return m ? parseInt(m[1], 10) : 9999;
+  }
+  function sortAlbums(a) {
+    return a.sort(function (x, y) {
+      var d = epNum(x.name) - epNum(y.name);
+      if (d) return d;
+      return (x.date || '').localeCompare(y.date || '');
+    });
+  }
+  async function search(s) {
+    var found = {}, out = [], saved = {}, newest = '';
+    s.albums.forEach(function (a) { saved[a.id] = 1; if ((a.date || '') > newest) newest = a.date || ''; });
+    state.msg = 'Suche läuft …'; render();
+    try {
+      for (var off = 0; off < 100; off += 10) {
+        var r = await api('GET', '/search?type=album&market=DE&limit=10&offset=' + off + '&q=' + encodeURIComponent(s.query));
+        if (!r.ok) { state.msg = 'Suche fehlgeschlagen (' + r.status + ')'; break; }
+        var j = await r.json();
+        var items = (j.albums && j.albums.items) || [];
+        if (!items.length) break;
+        items.forEach(function (a) {
+          if (!a || found[a.id]) return;
+          found[a.id] = 1;
+          var hay = (a.name + ' ' + (a.artists || []).map(function (x) { return x.name; }).join(' ')).toLowerCase();
+          var ok = !s.filter || hay.indexOf(s.filter.toLowerCase()) >= 0;
+          // schon eingerichtet: Gespeichertes bleibt an, neu erschienene Folgen kommen dazu
+          if (s.albums.length) ok = !!saved[a.id] || (ok && (a.release_date || '') > newest);
+          out.push({ id: a.id, name: a.name, img: (a.images && a.images[0]) ? a.images[0].url : '', date: a.release_date || '', on: ok });
+        });
+        if (items.length < 10) break;
+      }
+      if (out.length) state.msg = out.length + ' Treffer gefunden.';
+    } catch (e) { state.msg = 'Fehler: ' + e.message; }
+    state.results[s.id] = sortAlbums(out);
+    render();
+  }
+  async function loadDevices() {
+    try {
+      var r = await api('GET', '/me/player/devices');
+      var j = await r.json();
+      state.devices = j.devices || [];
+      state.msg = state.devices.length ? '' : 'Keine Geräte gefunden. Spotify kurz auf dem Echo oder Handy starten und erneut versuchen.';
+    } catch (e) { state.msg = 'Fehler: ' + e.message; }
+    render();
+  }
+
+  function seriesEditor(s) {
+    var res = state.results[s.id];
+    var qIn = h('input', { type: 'text', value: s.query, placeholder: 'Suchbegriff' });
+    var fIn = h('input', { type: 'text', value: s.filter, placeholder: 'Filter (Name muss enthalten)' });
+    var box = h('div', { class: 'box' }, [
+      h('b', {}, [s.name]),
+      h('div', {}, [h('small', {}, [s.albums.length + ' Folgen gespeichert'])]),
+      h('div', {}, [h('small', {}, ['Suchbegriff'])]), qIn,
+      h('div', {}, [h('small', {}, ['Filter'])]), fIn,
+      h('button', { onclick: function () { s.query = qIn.value; s.filter = fIn.value; saveCfg(); search(s); } }, ['Folgen suchen'])
+    ]);
+    if (res) {
+      res.forEach(function (a) {
+        var cb = h('input', { type: 'checkbox' });
+        cb.checked = a.on;
+        cb.addEventListener('change', function () { a.on = cb.checked; });
+        box.appendChild(h('div', { class: 'row' }, [cb, h('img', { src: a.img }), h('span', {}, [a.name + ' (' + a.date.slice(0, 4) + ')']),
+          h('button', { class: 'gray', onclick: function () { s.cover = a.img; saveCfg(); toast('🖼'); } }, ['Cover'])]));
+      });
+      box.appendChild(h('button', { onclick: function () {
+        s.albums = res.filter(function (a) { return a.on; }).map(function (a) { return { id: a.id, name: a.name, img: a.img, date: a.date }; });
+        sortAlbums(s.albums);
+        saveCfg(); delete state.results[s.id]; state.msg = s.name + ': ' + s.albums.length + ' Folgen gespeichert.'; render();
+      } }, ['Auswahl übernehmen']));
+    }
+    return box;
+  }
+
+  function renderParent() {
+    var out = [];
+    out.push(h('button', { class: 'back', onclick: function () { state.view = 'home'; state.msg = ''; render(); } }, ['⬅']));
+    var p = h('div', { class: 'p' });
+    if (state.msg) p.appendChild(h('div', { class: 'box' }, [state.msg]));
+
+    // 1. Spotify-App-ID und Login
+    p.appendChild(h('h2', {}, ['1. Spotify verbinden']));
+    var idIn = h('input', { type: 'text', value: cfg.clientId, placeholder: 'Client ID' });
+    p.appendChild(h('div', { class: 'box' }, [
+      h('small', {}, ['Redirect URI, genau so im Spotify Developer Dashboard eintragen:']),
+      h('div', {}, [h('code', {}, [REDIRECT])]),
+      h('div', {}, [h('small', {}, ['Client ID der Spotify-App'])]), idIn,
+      h('button', { onclick: function () { cfg.clientId = idIn.value.trim(); saveCfg(); if (cfg.clientId) login(); } }, [tok.refresh ? 'Neu verbinden' : 'Mit Spotify verbinden']),
+      tok.refresh ? h('div', {}, [h('small', {}, ['✅ Verbunden'])]) : null
+    ]));
+
+    if (tok.refresh) {
+      // 2. Gerät
+      p.appendChild(h('h2', {}, ['2. Wo soll es spielen?']));
+      var dbox = h('div', { class: 'box' }, [
+        h('div', {}, [h('small', {}, ['Aktuell: ' + (cfg.deviceName || 'zuletzt aktives Gerät')])]),
+        h('button', { onclick: loadDevices }, ['Geräte suchen']),
+        h('button', { class: 'gray', onclick: function () { cfg.deviceId = null; cfg.deviceName = ''; saveCfg(); render(); } }, ['Kein festes Gerät'])
+      ]);
+      (state.devices || []).forEach(function (d) {
+        dbox.appendChild(h('button', { onclick: function () { cfg.deviceId = d.id; cfg.deviceName = d.name; saveCfg(); state.msg = 'Gerät gewählt: ' + d.name; render(); } },
+          [d.name + ' (' + d.type + ')']));
+      });
+      p.appendChild(dbox);
+
+      // 3. Hörspielreihen
+      p.appendChild(h('h2', {}, ['3. Hörspielreihen']));
+      cfg.series.forEach(function (s) { p.appendChild(seriesEditor(s)); });
+
+      p.appendChild(h('h2', {}, ['Sonstiges']));
+      p.appendChild(h('button', { class: 'red', onclick: function () {
+        tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
+      } }, ['Von Spotify abmelden']));
+    }
+    out.push(p);
+    return out;
+  }
+
+  /* ---------- Rendering ---------- */
+  function render() {
+    root.innerHTML = '';
+    var parts;
+    if (state.view === 'parent') parts = renderParent();
+    else if (state.view === 'series') parts = renderSeries();
+    else parts = renderHome();
+    parts.forEach(function (n) { root.appendChild(n); });
+    if (state.view !== 'parent') {
+      var nb = nowBar();
+      if (nb) root.appendChild(nb);
+      root.appendChild(gearLongPress());
+    }
+  }
+
+  handleRedirect().then(render, render).then(syncPlayer);
+  document.addEventListener('visibilitychange', syncPlayer);
+  setInterval(syncPlayer, 120000);
+})();
+</script>
+</body>
+</html>
