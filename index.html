@@ -16,6 +16,11 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .tile.sel{outline:6px solid #ff8a00}
 .tile .num{position:absolute;right:8px;bottom:8px;background:#ff8a00;color:#fff;font-size:44px;font-weight:800;border-radius:50%;width:72px;height:72px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 rgba(0,0,0,.25)}
 .p .trk{font-size:13px}
+.devs{display:flex;gap:12px;justify-content:flex-end;margin:0 0 14px}
+.dev{border:0;background:#fff;font-size:44px;width:92px;height:76px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.18);opacity:.45}
+.dev.on{opacity:1;outline:5px solid #2bb673}
+.dev:active{transform:translateY(4px)}
+.topbar{display:flex;justify-content:space-between;align-items:flex-start}
 .tile .tname{position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px;font-size:22px;font-weight:700;background:#ffd166;color:#333}
 .p select{font-size:16px;padding:8px;border-radius:10px;margin:4px 0}
 .back{border:0;background:#ff8a00;color:#fff;font-size:54px;line-height:1;width:96px;height:80px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.2);margin:0 0 14px}
@@ -67,6 +72,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     try { var v = JSON.parse(localStorage.getItem(k)); return v || d; } catch (e) { return d; }
   }
   var cfg = load('hs_cfg', DEFAULT_CFG);
+  if (!cfg.devices) cfg.devices = cfg.deviceId ? [{ id: cfg.deviceId, name: cfg.deviceName, type: 'Speaker' }] : [];
   var tok = load('hs_tok', {});
   function saveCfg() { localStorage.setItem('hs_cfg', JSON.stringify(cfg)); }
   function saveTok() { localStorage.setItem('hs_tok', JSON.stringify(tok)); }
@@ -182,6 +188,37 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     setTimeout(function () { if (toastEl) { toastEl.remove(); toastEl = null; } }, 2500);
   }
   function devQ() { return cfg.deviceId ? '?device_id=' + encodeURIComponent(cfg.deviceId) : ''; }
+  function devIcon(d) { return /smartphone|tablet/i.test(d.type || '') ? '📱' : /speaker|avr|stb|tv/i.test(d.type || '') ? '🔊' : '🎵'; }
+  function currentDev() {
+    for (var i = 0; i < cfg.devices.length; i++) if (cfg.devices[i].id === cfg.deviceId) return cfg.devices[i];
+    return null;
+  }
+  /* Gerät neu suchen (IDs können sich ändern) und Wiedergabe dorthin holen */
+  async function wakeDevice(play) {
+    var d = currentDev();
+    if (!d) return false;
+    var r = await api('GET', '/me/player/devices');
+    if (!r.ok) return false;
+    var list = (await r.json()).devices || [];
+    var f = list.filter(function (x) { return x.id === d.id; })[0] || list.filter(function (x) { return x.name === d.name; })[0];
+    if (!f) return false;
+    if (f.id !== d.id) { d.id = f.id; cfg.deviceId = f.id; cfg.deviceName = f.name; saveCfg(); }
+    var t = await api('PUT', '/me/player', { device_ids: [f.id], play: !!play });
+    return t.ok || t.status === 204;
+  }
+  async function switchDevice(d) {
+    if (busy || d.id === cfg.deviceId) return;
+    busy = true;
+    cfg.deviceId = d.id; cfg.deviceName = d.name; saveCfg(); render();
+    try {
+      if (state.now) {
+        var ok = await wakeDevice(state.playing);
+        if (!ok) toast(devIcon(d) + '❓');
+        else if (stopInfo && state.playing) scheduleStop(4000);
+      }
+    } catch (e) { toast(devIcon(d) + '❓'); }
+    busy = false;
+  }
 
   var busy = false;
   async function play(album, story) {
@@ -192,9 +229,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       if (story) body.offset = { position: story.start };
       var r = await api('PUT', '/me/player/play' + devQ(), body);
       if (r.status === 404 && cfg.deviceId) {
-        await api('PUT', '/me/player', { device_ids: [cfg.deviceId], play: false });
-        await sleep(1000);
-        r = await api('PUT', '/me/player/play' + devQ(), body);
+        if (await wakeDevice(false)) {
+          await sleep(1000);
+          r = await api('PUT', '/me/player/play' + devQ(), body);
+        } else { var cd = currentDev(); toast((cd ? devIcon(cd) : '🔊') + '❓'); busy = false; return; }
       }
       if (r.ok) {
         state.now = album; state.story = story || null; state.playing = true; render();
@@ -339,12 +377,21 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     g.addEventListener('mouseup', stop);
     return g;
   }
+  function devBar() {
+    if (cfg.devices.length < 2) return null;
+    return h('div', { class: 'devs' }, cfg.devices.map(function (d) {
+      return h('button', { class: 'dev' + (d.id === cfg.deviceId ? ' on' : ''), onclick: function () { switchDevice(d); } }, [devIcon(d)]);
+    }));
+  }
+  function withBack(onBack) {
+    return h('div', { class: 'topbar' }, [h('button', { class: 'back', onclick: onBack }, ['⬅']), devBar()]);
+  }
   function renderHome() {
     var list = cfg.series.filter(function (s) { return s.albums.length; });
     if (!list.length) {
       return [h('div', { class: 'hint' }, ['Noch keine Hörspiele eingerichtet. Zum Einrichten das Zahnrad unten rechts 2 Sekunden gedrückt halten.'])];
     }
-    return [h('div', { class: 'grid' }, list.map(function (s) {
+    return [devBar(), h('div', { class: 'grid' }, list.map(function (s) {
       return h('button', { class: 'tile', onclick: function () { state.view = 'series'; state.seriesId = s.id; render(); window.scrollTo(0, 0); } },
         [tileContent(coverOf(s), s.name)]);
     }))];
@@ -353,7 +400,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var s = findSeries(state.seriesId);
     if (!s) { state.view = 'home'; return renderHome(); }
     return [
-      h('button', { class: 'back', onclick: function () { state.view = 'home'; render(); } }, ['⬅']),
+      withBack(function () { state.view = 'home'; render(); }),
       h('div', { class: 'grid' }, s.albums.map(function (a) {
         return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () { if (s.split) openAlbum(s, a); else play(a); } },
           [tileContent(a.img, a.name)]);
@@ -364,7 +411,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     var a = findItem(state.albumUri);
     if (!a || !a.stories) { state.view = 'series'; return renderSeries(); }
     return [
-      h('button', { class: 'back', onclick: function () { state.view = 'series'; render(); } }, ['⬅']),
+      withBack(function () { state.view = 'series'; render(); }),
       h('div', { class: 'grid' }, a.stories.map(function (st, i) {
         var sel = state.now === a && state.story && state.story.start === st.start;
         return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () { play(a, st); } },
@@ -613,16 +660,23 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     ]));
 
     if (tok.refresh) {
-      // 2. Gerät
+      // 2. Geräte
       p.appendChild(h('h2', {}, ['2. Wo soll es spielen?']));
       var dbox = h('div', { class: 'box' }, [
-        h('div', {}, [h('small', {}, ['Aktuell: ' + (cfg.deviceName || 'zuletzt aktives Gerät')])]),
-        h('button', { onclick: loadDevices }, ['Geräte suchen']),
-        h('button', { class: 'gray', onclick: function () { cfg.deviceId = null; cfg.deviceName = ''; saveCfg(); render(); } }, ['Kein festes Gerät'])
+        h('div', {}, [h('small', {}, ['Ausgewählt: ' + (cfg.devices.length ? cfg.devices.map(function (d) { return devIcon(d) + ' ' + d.name + (d.id === cfg.deviceId ? ' (aktiv)' : ''); }).join(', ') : 'keins – es spielt auf dem zuletzt aktiven Gerät')])]),
+        h('div', {}, [h('small', {}, ['Bei zwei oder mehr Geräten sieht deine Tochter oben einen Umschalter.'])]),
+        h('button', { onclick: loadDevices }, ['Geräte suchen'])
       ]);
       (state.devices || []).forEach(function (d) {
-        dbox.appendChild(h('button', { onclick: function () { cfg.deviceId = d.id; cfg.deviceName = d.name; saveCfg(); state.msg = 'Gerät gewählt: ' + d.name; render(); } },
-          [d.name + ' (' + d.type + ')']));
+        var cb = h('input', { type: 'checkbox' });
+        cb.checked = cfg.devices.some(function (x) { return x.id === d.id || x.name === d.name; });
+        cb.addEventListener('change', function () {
+          cfg.devices = cfg.devices.filter(function (x) { return x.id !== d.id && x.name !== d.name; });
+          if (cb.checked) cfg.devices.push({ id: d.id, name: d.name, type: d.type });
+          if (!currentDev()) { cfg.deviceId = cfg.devices[0] ? cfg.devices[0].id : null; cfg.deviceName = cfg.devices[0] ? cfg.devices[0].name : ''; }
+          saveCfg(); render();
+        });
+        dbox.appendChild(h('label', { class: 'row' }, [cb, h('span', {}, [devIcon(d) + ' ' + d.name + ' (' + d.type + ')'])]));
       });
       p.appendChild(dbox);
 
@@ -648,7 +702,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     else if (state.view === 'series') parts = renderSeries();
     else if (state.view === 'stories') parts = renderStories();
     else parts = renderHome();
-    parts.forEach(function (n) { root.appendChild(n); });
+    parts.forEach(function (n) { if (n) root.appendChild(n); });
     if (state.view !== 'parent') {
       var nb = nowBar();
       if (nb) root.appendChild(nb);
