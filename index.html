@@ -14,7 +14,8 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .tile:active{transform:translateY(4px);box-shadow:0 1px 0 rgba(0,0,0,.18)}
 .tile img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
 .tile.sel{outline:6px solid #ff8a00}
-.tile .num{position:absolute;right:8px;bottom:8px;background:#ff8a00;color:#fff;font-size:44px;font-weight:800;border-radius:50%;width:72px;height:72px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 0 rgba(0,0,0,.25)}
+.tile .sym{position:absolute;right:8px;bottom:8px;width:80px;height:80px;pointer-events:none;filter:drop-shadow(0 3px 0 rgba(0,0,0,.25))}
+.tile .sym svg{width:100%;height:100%;display:block}
 .p .trk{font-size:13px}
 .devs{display:flex;gap:12px;justify-content:flex-end;margin:0 0 14px}
 .dev{border:0;background:#fff;font-size:44px;width:92px;height:76px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.18);opacity:.45}
@@ -353,7 +354,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       loadingAlbum = false;
     }
     if (!a.stories || a.stories.length < 2) return play(a);
-    state.view = 'stories'; state.albumUri = uriOf(a); render(); window.scrollTo(0, 0);
+    state.view = 'stories'; state.albumUri = uriOf(a); state.storiesSince = Date.now(); render(); window.scrollTo(0, 0);
   }
   async function togglePlay() {
     if (busy) return;
@@ -441,6 +442,22 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       }))
     ];
   }
+  /* Version 8: feste Farb-Form-Folge statt Ziffern – Geschichte 1 ist immer rot/Kreis usw.
+     Nach 6 Geschichten wiederholt sich die Folge. */
+  var SYMBOLS = [
+    { color: '#e53935', shape: '<circle cx="50" cy="50" r="43"/>' },
+    { color: '#1e88e5', shape: '<rect x="8" y="8" width="84" height="84" rx="10"/>' },
+    { color: '#fdd835', shape: '<polygon points="50,7 95,90 5,90"/>' },
+    { color: '#43a047', shape: '<polygon points="50,8 61,39 94,40 68,60 77,91 50,73 23,91 32,60 6,40 39,39"/>' },
+    { color: '#8e24aa', shape: '<path d="M50 90C22 70 5 54 5 33C5 17 17 7 30 7C40 7 46 13 50 21C54 13 60 7 70 7C83 7 95 17 95 33C95 54 78 70 50 90Z"/>' },
+    { color: '#fb8c00', shape: '<polygon points="50,5 95,50 50,95 5,50"/>' }
+  ];
+  function symbol(i) {
+    var s = SYMBOLS[i % SYMBOLS.length];
+    var el = h('span', { class: 'sym' });
+    el.innerHTML = '<svg viewBox="0 0 100 100"><g fill="' + s.color + '" stroke="#fff" stroke-width="6" stroke-linejoin="round">' + s.shape + '</g></svg>';
+    return el;
+  }
   function renderStories() {
     var a = findItem(state.albumUri);
     if (!a || !a.stories) { state.view = 'series'; return renderSeries(); }
@@ -448,8 +465,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       withBack(function () { state.view = 'series'; render(); }),
       h('div', { class: 'grid' }, a.stories.map(function (st, i) {
         var sel = state.now === a && state.story && state.story.start === st.start;
-        return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () { play(a, st); } },
-          [tileContent(a.img, a.name), h('span', { class: 'num' }, [String(i + 1)])]);
+        return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () {
+          if (Date.now() - (state.storiesSince || 0) < 500) return; // versehentliches Nachtippen nach dem Öffnen
+          play(a, st);
+        } }, [tileContent(a.img, a.name), symbol(i)]);
       }))
     ];
   }
@@ -722,7 +741,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(h('button', { class: 'red', onclick: function () {
         tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
       } }, ['Von Spotify abmelden']));
-      p.appendChild(h('div', {}, [h('small', {}, ['Version 7'])]));
+      p.appendChild(h('div', {}, [h('small', {}, ['Version 8'])]));
     }
     out.push(p);
     return out;
