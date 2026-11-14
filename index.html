@@ -14,15 +14,15 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .tile:active{transform:translateY(4px);box-shadow:0 1px 0 rgba(0,0,0,.18)}
 .tile img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
 .tile.sel{outline:6px solid #ff8a00}
-.tile .sym{position:absolute;right:8px;bottom:8px;width:80px;height:80px;pointer-events:none;filter:drop-shadow(0 3px 0 rgba(0,0,0,.25))}
-.tile .sym svg{width:100%;height:100%;display:block}
+.tile .sym,.cv .sym{position:absolute;right:8px;bottom:8px;width:80px;height:80px;pointer-events:none;filter:drop-shadow(0 3px 0 rgba(0,0,0,.25))}
+.tile .sym svg,.cv .sym svg{width:100%;height:100%;display:block}
 .p .trk{font-size:13px}
 .devs{display:flex;gap:12px;justify-content:flex-end;margin:0 0 14px}
 .dev{border:0;background:#fff;font-size:44px;width:92px;height:76px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.18);opacity:.45}
 .dev.on{opacity:1;outline:5px solid #2bb673}
 .dev:active{transform:translateY(4px)}
 .topbar{display:flex;justify-content:space-between;align-items:flex-start}
-.tile .tname{position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px;font-size:22px;font-weight:700;background:#ffd166;color:#333}
+.tile .tname,.cv .tname{position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px;font-size:22px;font-weight:700;background:#ffd166;color:#333}
 .p select{font-size:16px;padding:8px;border-radius:10px;margin:4px 0}
 .back{border:0;background:#ff8a00;color:#fff;font-size:54px;line-height:1;width:96px;height:80px;border-radius:22px;box-shadow:0 5px 0 rgba(0,0,0,.2);margin:0 0 14px}
 .back:active{transform:translateY(4px)}
@@ -35,6 +35,16 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
 .pp{border:0;background:#2bb673;color:#fff;font-size:52px;width:110px;height:84px;border-radius:24px;box-shadow:0 5px 0 rgba(0,0,0,.2)}
 .pp:active{transform:translateY(4px)}
 .toast{position:fixed;left:50%;top:20px;transform:translateX(-50%);background:#fff;border-radius:20px;padding:14px 22px;font-size:40px;box-shadow:0 4px 14px rgba(0,0,0,.25);z-index:9}
+/* Version 10: Abspielansicht über den ganzen Bildschirm */
+.player{position:fixed;left:0;top:0;right:0;bottom:0;background:#fff3d6;display:flex;flex-direction:column;padding:14px 14px calc(14px + env(safe-area-inset-bottom));z-index:6;overflow:hidden}
+.player .stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center}
+.player .cv{position:relative;width:min(92vw,calc(100vh - 240px));height:min(92vw,calc(100vh - 240px));border-radius:28px;overflow:hidden;background:#fff;box-shadow:0 6px 0 rgba(0,0,0,.18);pointer-events:none}
+@supports (height:100dvh){.player .cv{width:min(92vw,calc(100dvh - 240px));height:min(92vw,calc(100dvh - 240px))}}
+.player .cv img{width:100%;height:100%;object-fit:cover;display:block}
+.player .cv .sym{right:4%;bottom:4%;width:24%;height:24%}
+.player .ctrl{display:flex;align-items:center;justify-content:space-between;padding-top:14px}
+.player .side{width:70px;height:70px;display:flex;align-items:center;justify-content:center}
+.player .pp{width:150px;height:104px;font-size:64px}
 /* Elternbereich */
 .p{font-size:16px;-webkit-user-select:text;user-select:text}
 .p h2{margin:22px 0 8px;font-size:20px}
@@ -89,7 +99,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     if (changed) saveCfg();
   })();
 
-  var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '' };
+  var state = { view: 'home', seriesId: null, now: null, playing: false, results: {}, devices: null, msg: '', backTo: 'home', lockUntil: 0 };
 
   var root = document.getElementById('app');
 
@@ -129,6 +139,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   function tileContent(img, name) {
     return img ? h('img', { src: img }) : h('span', { class: 'tname' }, [name || '?']);
   }
+  function locked() { return Date.now() < (state.lockUntil || 0); }
 
   /* ---------- Spotify Login (PKCE) ---------- */
   async function login() {
@@ -233,6 +244,22 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     busy = false;
   }
 
+  /* Version 10: große Abspielansicht öffnen bzw. verlassen */
+  function openPlayer() {
+    if (!state.now) return;
+    if (state.view !== 'player') state.backTo = state.view;
+    state.view = 'player';
+    render();
+    window.scrollTo(0, 0);
+  }
+  function leavePlayer() {
+    state.view = state.backTo || 'home';
+    if (state.view === 'player' || state.view === 'parent') state.view = 'home';
+    state.lockUntil = Date.now() + 500; // kein versehentliches Antippen der Kachel unter dem Finger
+    render();
+    window.scrollTo(0, 0);
+  }
+
   var busy = false;
   async function play(album, story) {
     if (busy) return;
@@ -248,9 +275,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
         } else { var cd = currentDev(); toast((cd ? devIcon(cd) : '🔊') + '❓'); busy = false; return; }
       }
       if (r.ok) {
-        state.now = album; state.story = story || null; state.playing = true; render();
+        state.now = album; state.story = story || null; state.playing = true;
         stopInfo = story ? { uri: uriOf(album), album: album, story: story } : null;
         if (stopInfo) scheduleStop(4000); else clearTimeout(stopTimer);
+        if (state.view === 'parent') render(); else openPlayer();
       }
       else { toast('😕'); console.log('play status', r.status); }
     } catch (e) { toast('😕'); console.log(e); }
@@ -355,7 +383,7 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       loadingAlbum = false;
     }
     if (!a.stories || a.stories.length < 2) return play(a);
-    state.view = 'stories'; state.albumUri = uriOf(a); state.storiesSince = Date.now(); render(); window.scrollTo(0, 0);
+    state.view = 'stories'; state.albumUri = uriOf(a); state.lockUntil = Date.now() + 500; render(); window.scrollTo(0, 0);
   }
   /* Version 9: Symbol wechselt sofort beim Tippen; schlägt der Befehl fehl, springt es zurück.
      403 heißt bei Spotify meist „ist schon so“ (z. B. schon pausiert) und zählt als Erfolg. */
@@ -397,8 +425,9 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
   /* ---------- Kinder-Ansicht ---------- */
   function nowBar() {
     if (!state.now) return null;
+    // Tipp auf das kleine Cover öffnet wieder die große Abspielansicht
     return h('div', { class: 'now' }, [
-      state.now.img ? h('img', { src: state.now.img }) : h('b', {}, [state.now.name]),
+      state.now.img ? h('img', { src: state.now.img, onclick: openPlayer }) : h('b', { onclick: openPlayer }, [state.now.name]),
       h('div', { class: 'sp' }, [gearLongPress(true)]),   // Zahnrad in der freien Mitte, nicht über dem Pause-Knopf
       h('button', { class: 'pp', onclick: togglePlay }, [state.playing ? '⏸' : '▶️'])
     ]);
@@ -440,8 +469,10 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
     return [
       withBack(function () { state.view = 'home'; render(); }),
       h('div', { class: 'grid' }, s.albums.map(function (a) {
-        return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () { if (s.split) openAlbum(s, a); else play(a); } },
-          [tileContent(a.img, a.name)]);
+        return h('button', { class: 'tile' + (state.now && state.now.id === a.id ? ' sel' : ''), onclick: function () {
+          if (locked()) return;
+          if (s.split) openAlbum(s, a); else play(a);
+        } }, [tileContent(a.img, a.name)]);
       }))
     ];
   }
@@ -469,11 +500,30 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       h('div', { class: 'grid' }, a.stories.map(function (st, i) {
         var sel = state.now === a && state.story && state.story.start === st.start;
         return h('button', { class: 'tile' + (sel ? ' sel' : ''), onclick: function () {
-          if (Date.now() - (state.storiesSince || 0) < 500) return; // versehentliches Nachtippen nach dem Öffnen
+          if (locked()) return; // versehentliches Nachtippen nach dem Öffnen
           play(a, st);
         } }, [tileContent(a.img, a.name), symbol(i)]);
       }))
     ];
+  }
+  /* Version 10: ruhiger Bildschirm, solange etwas läuft – nur Zurück, großes Cover, Play/Pause, Zahnrad.
+     Das Cover selbst reagiert auf nichts. */
+  function renderPlayer() {
+    var a = state.now;
+    if (!a) { state.view = state.backTo || 'home'; return renderView(); }
+    var idx = -1;
+    if (state.story && a.stories) {
+      for (var i = 0; i < a.stories.length; i++) if (a.stories[i].start === state.story.start) idx = i;
+    }
+    return [h('div', { class: 'player' }, [
+      withBack(leavePlayer),
+      h('div', { class: 'stage' }, [h('div', { class: 'cv' }, [tileContent(a.img, a.name), idx >= 0 ? symbol(idx) : null])]),
+      h('div', { class: 'ctrl' }, [
+        h('div', { class: 'side' }),
+        h('button', { class: 'pp', onclick: togglePlay }, [state.playing ? '⏸' : '▶️']),
+        h('div', { class: 'side' }, [gearLongPress(true)])
+      ])
+    ])];
   }
 
   /* ---------- Elternbereich ---------- */
@@ -744,22 +794,26 @@ html,body{margin:0;height:100%;background:#fff3d6;font-family:-apple-system,Helv
       p.appendChild(h('button', { class: 'red', onclick: function () {
         tok = {}; saveTok(); state.devices = null; state.msg = 'Abgemeldet.'; render();
       } }, ['Von Spotify abmelden']));
-      p.appendChild(h('div', {}, [h('small', {}, ['Version 9'])]));
+      p.appendChild(h('div', {}, [h('small', {}, ['Version 10'])]));
     }
     out.push(p);
     return out;
   }
 
   /* ---------- Rendering ---------- */
+  function renderView() {
+    if (state.view === 'parent') return renderParent();
+    if (state.view === 'player') return renderPlayer();
+    if (state.view === 'series') return renderSeries();
+    if (state.view === 'stories') return renderStories();
+    state.view = 'home';
+    return renderHome();
+  }
   function render() {
     root.innerHTML = '';
-    var parts;
-    if (state.view === 'parent') parts = renderParent();
-    else if (state.view === 'series') parts = renderSeries();
-    else if (state.view === 'stories') parts = renderStories();
-    else parts = renderHome();
+    var parts = renderView();
     parts.forEach(function (n) { if (n) root.appendChild(n); });
-    if (state.view !== 'parent') {
+    if (state.view !== 'parent' && state.view !== 'player') {
       var nb = nowBar();
       if (nb) root.appendChild(nb);
       else root.appendChild(gearLongPress());
